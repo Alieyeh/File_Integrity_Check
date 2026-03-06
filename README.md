@@ -5,8 +5,10 @@ to install n8n use command: npm install n8n -g
 
 run using>
 on powershell:
+
 ''' 
 $env:NODES_EXCLUDE='[]'
+
 n8n start
 
 '''
