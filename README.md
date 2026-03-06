@@ -1,5 +1,10 @@
 # File Integrity Check
 
+![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+![Node.js](https://img.shields.io/badge/node.js-required-green)
+![n8n](https://img.shields.io/badge/n8n-workflow-orange)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
+
 A monitoring tool designed to detect **file deletions, rollbacks
 (version reverts), and unexpected changes** in large directory trees.
 
@@ -21,13 +26,11 @@ structures efficiently**.
 
 # Architecture
 
-The system is composed of three main components:
+The system consists of three main components:
 
 1.  **Python Scanner**
 2.  **n8n Workflow**
 3.  **SQLite State Database**
-
-The workflow is illustrated below.
 
 ![Workflow Diagram](n8n.jpg)
 
@@ -51,50 +54,37 @@ The workflow is illustrated below.
 
 # What the Program Detects
 
-The scanner detects the following events:
+  Event             Description
+  ----------------- ------------------------------------------------
+  missing           File previously present is now gone
+  changed           File contents changed to a new version
+  reverted          File reverted to a previously recorded version
+  mtime_went_back   File modification timestamp moved backwards
 
-  -----------------------------------------------------------------------
-  Event Type                          Description
-  ----------------------------------- -----------------------------------
-  **missing**                         A file previously present no longer
-                                      exists
-
-  **changed**                         File contents changed to a new
-                                      version
-
-  **reverted**                        File contents match an **older
-                                      previously recorded version**
-
-  **mtime_went_back**                 File modification timestamp moved
-                                      backwards
-  -----------------------------------------------------------------------
-
-High severity alerts typically include:
+High severity alerts normally include:
 
 -   deleted files
--   reverted file versions
+-   reverted versions
 
 ------------------------------------------------------------------------
 
 # Performance Design
 
-The scanner is optimized for **very large file systems**.
-
-Key performance techniques:
+This tool is designed for **very large directory trees**.
 
 ### Metadata-first scanning
 
-The scanner initially collects only:
+The scanner first collects only:
 
--   path
--   size
+-   file path
+-   file size
 -   modification time
 
-Hashing is performed **only when metadata indicates a change**.
+Hashing only occurs when metadata changes.
 
 ### Partial hashing
 
-Large files are hashed using:
+Large files use:
 
     first N bytes + last N bytes + file size
 
@@ -102,16 +92,16 @@ instead of hashing the entire file.
 
 ### Parallel hashing
 
-Hash calculations are executed using:
+Parallel hashing is controlled by:
 
     --max-workers 6
 
-This significantly speeds up scanning without overwhelming storage I/O.
+This dramatically speeds up scanning without overwhelming disk IO.
 
 ### Directory pruning
 
-Directories are excluded early during traversal to avoid unnecessary
-scanning.
+Directories can be excluded early in traversal to avoid scanning large
+archive areas.
 
 Examples:
 
@@ -126,14 +116,12 @@ Examples:
     project/
     │
     ├── watch_s_drive.py
-    │     Python scanner
+    ├── workflows/
+    │     file_integrity_workflow.json
     │
     ├── reports/
-    │     Output reports and latest run JSON
     │
     ├── n8n.png
-    │     Workflow diagram
-    │
     └── README.md
 
 ------------------------------------------------------------------------
@@ -142,33 +130,24 @@ Examples:
 
 ## Install Node.js
 
-Download from:
-
 https://nodejs.org/
 
 ## Install n8n
 
-``` bash
-npm install n8n -g
-```
+    npm install n8n -g
 
 ------------------------------------------------------------------------
 
 # Running n8n
 
-Set environment variables before starting.
-
 PowerShell:
 
-``` powershell
-$env:NODES_EXCLUDE='[]'
+    $env:NODES_EXCLUDE='[]'
+    $env:N8N_RESTRICT_FILE_ACCESS_TO="C:\...\project\file_check;C:\...\reports"
 
-$env:N8N_RESTRICT_FILE_ACCESS_TO="C:\...\project\file_check;C:\...\reports"
+    n8n start
 
-n8n start
-```
-
-Open the n8n interface:
+Open:
 
     http://localhost:5678
 
@@ -176,24 +155,78 @@ Open the n8n interface:
 
 # Python Scanner Execution
 
-Example command used in the **Execute Command** node:
+Example command used in the **Execute Command node**:
 
-``` bash
-cmd /c python "C:\...\file_check\watch_s_drive.py" ^
-    --root "C:\\" ^
-    --max-workers 6 ^
-    --no-hash-new-files ^
-    --latest-json "C:\...\file_check\reports\latest.json"
-```
+    cmd /c python "C:\...\file_check\watch_s_drive.py" ^
+        --root "C:\\" ^
+        --max-workers 6 ^
+        --no-hash-new-files ^
+        --latest-json "C:\...\file_check\reports\latest.json"
 
 ### Arguments
 
-  Argument                Description
-  ----------------------- ------------------------------------------
-  `--root`                Root directory to scan
-  `--max-workers`         Number of threads used for hashing
-  `--no-hash-new-files`   Skip hashing for newly discovered files
-  `--latest-json`         Path where latest run summary is written
+  Argument              Description
+  --------------------- -----------------------------
+  --root                Root directory to scan
+  --max-workers         Number of hashing threads
+  --no-hash-new-files   Skip hashing for new files
+  --latest-json         Path for latest run summary
+
+------------------------------------------------------------------------
+
+# n8n Workflow
+
+The repository contains an exported workflow:
+
+    workflows/file_integrity_workflow.json
+
+To import into n8n:
+
+1.  Open the n8n editor UI
+2.  Click **Import Workflow**
+3.  Select the JSON file
+4.  Adjust file paths for your environment
+
+------------------------------------------------------------------------
+
+# Configuration
+
+Several configuration options control how scanning behaves.
+
+### Directory Exclusions
+
+Directories can be excluded using rules such as:
+
+-   folder names starting with numbers
+-   archive folders
+-   system folders
+
+Example configuration inside the script:
+
+    EXCLUDED_DIR_NAMES = {
+        "System Volume Information",
+        "$RECYCLE.BIN",
+        "Archive",
+        "Backups"
+    }
+
+Entire path prefixes may also be excluded:
+
+    EXCLUDED_PATH_PREFIXES = [
+        r"S:\Archive",
+        r"S:\Backups"
+    ]
+
+### Performance Settings
+
+  Setting             Purpose
+  ------------------- ------------------------------
+  max-workers         Parallel hashing threads
+  sample-bytes        Size of file sections hashed
+  no-hash-new-files   Skip hashing new files
+
+These settings allow the scanner to scale to **multi-terabyte storage
+systems**.
 
 ------------------------------------------------------------------------
 
@@ -201,53 +234,42 @@ cmd /c python "C:\...\file_check\watch_s_drive.py" ^
 
 ### JSON summary
 
-`reports/latest.json`
-
-Contains:
-
--   run id
--   scan statistics
--   list of detected events
+    reports/latest.json
 
 Example:
 
-``` json
-{
-  "run_id": "2026-03-06T01-00",
-  "root": "S:\\",
-  "stats": {
-    "scanned_files": 145233,
-    "hashed_files": 431,
-    "events": 2,
-    "high": 1
-  }
-}
-```
+    {
+      "run_id": "2026-03-06T01-00",
+      "stats": {
+        "scanned_files": 145233,
+        "hashed_files": 431,
+        "events": 2,
+        "high": 1
+      }
+    }
 
 ### CSV report
 
     events_<runid>.csv
 
-Contains all detected events for the run.
-
 ------------------------------------------------------------------------
 
 # Quick Start (5 Minute Setup)
 
-1.  Install **Node.js**
-2.  Install **n8n**
+1.  Install Node.js
+2.  Install n8n
 
 ```{=html}
 <!-- -->
 ```
     npm install n8n -g
 
-3.  Clone this repository
+3.  Clone repository
 
 ```{=html}
 <!-- -->
 ```
-    git clone https://github.com/yourusername/file_integrity_check.git
+    git clone https://github.com/<your-user>/file_integrity_check.git
 
 4.  Start n8n
 
@@ -256,33 +278,33 @@ Contains all detected events for the run.
 ```
     n8n start
 
-5.  Open the n8n UI
+5.  Open
 
 ```{=html}
 <!-- -->
 ```
     http://localhost:5678
 
-6.  Import the workflow and configure the **Execute Command node** to
-    run:
+6.  Import workflow from:
 
 ```{=html}
 <!-- -->
 ```
-    python watch_s_drive.py --root "S:\" --max-workers 6 --no-hash-new-files --latest-json "reports/latest.json"
+    workflows/file_integrity_workflow.json
 
-7.  Run the workflow manually once to verify output.
+7.  Update file paths in the Execute Command node.
+
+8.  Run workflow once to verify output.
 
 ------------------------------------------------------------------------
 
 # Troubleshooting
 
-## S: Drive Not Found
+## S: Drive Not Found
 
-If the script runs as a service or under n8n, the `S:\` mapped drive may
-not exist.
+Mapped drives may not exist for background services.
 
-Use the **UNC path instead**:
+Use a UNC path instead:
 
     \\server\share
 
@@ -290,14 +312,11 @@ Example:
 
     --root "\\server\share"
 
-Mapped drives are tied to user sessions and may not be visible to
-services.
-
 ------------------------------------------------------------------------
 
 ## n8n Cannot Access Files
 
-If n8n cannot read or write files, check the environment variable:
+Check environment variable:
 
     N8N_RESTRICT_FILE_ACCESS_TO
 
@@ -305,23 +324,21 @@ Example:
 
     $env:N8N_RESTRICT_FILE_ACCESS_TO="C:\project\file_check;C:\reports"
 
-This restricts file access to specific directories for security.
-
 ------------------------------------------------------------------------
 
 ## Python Script Produces No Output
 
-If the n8n node reports:
+If n8n reports:
 
     ERROR: No stdout from Python run
 
 Check:
 
--   Python path is correct
--   Script runs manually
--   Output JSON is printed to stdout
+-   Python path
+-   script permissions
+-   JSON printed to stdout
 
-Test manually:
+Manual test:
 
     python watch_s_drive.py --root "S:\"
 
@@ -329,25 +346,14 @@ Test manually:
 
 ## Slow Scans
 
-For very large file systems:
+Large directory trees may require tuning.
 
--   reduce hashing using
+Try:
 
-```{=html}
-<!-- -->
-```
     --no-hash-new-files
-
--   reduce worker threads
-
-```{=html}
-<!-- -->
-```
     --max-workers 4
 
--   exclude archive directories
-
-This greatly improves performance.
+and exclude archive directories.
 
 ------------------------------------------------------------------------
 
@@ -356,9 +362,9 @@ This greatly improves performance.
 This system is useful for:
 
 -   detecting silent data corruption
--   identifying unintended file version rollbacks
--   auditing large shared storage environments
--   monitoring research or production data directories
+-   identifying unintended file rollbacks
+-   auditing large shared storage
+-   monitoring research data environments
 
 ------------------------------------------------------------------------
 
