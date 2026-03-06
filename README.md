@@ -183,6 +183,13 @@ Example command used in the **Execute Command node**:
   --max-workers         Number of hashing threads
   --no-hash-new-files   Skip hashing for new files
   --latest-json         Path for latest run summary
+  
+  -----------------------------------------------------
+
+Update the Execute Command node to match your environment:
+
+--root "S:\"
+
 
 ------------------------------------------------------------------------
 
