@@ -7,7 +7,12 @@ run using>
 on powershell:
 
 ''' 
+
 $env:NODES_EXCLUDE='[]'
+
+
+$env:N8N_RESTRICT_FILE_ACCESS_TO="C:\...\project\file_check;C:\...\reports"
+
 
 n8n start
 
