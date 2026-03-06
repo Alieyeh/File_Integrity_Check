@@ -181,12 +181,12 @@ Example command used in the **Execute Command node**:
 
 ### Arguments
 
-  Argument              Description
-  --------------------- -----------------------------
-  --root                Root directory to scan
-  --max-workers         Number of hashing threads
-  --no-hash-new-files   Skip hashing for new files
-  --latest-json         Path for latest run summary
+  Argument                Description
+  ----------------------- ------------------------------------------
+  `--root`                Root directory to scan
+  `--max-workers`         Number of threads used for hashing
+  `--no-hash-new-files`   Skip hashing for newly discovered files
+  `--latest-json`         Path where latest run summary is written
 
 ------------------------------------------------------------------------
 
