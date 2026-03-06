@@ -1,107 +1,367 @@
-# File_Integrity_Check
-for checking file version revert or deletion on portal.
-install node.js
-to install n8n use command: npm install n8n -g
+# File Integrity Check
 
-run using>
-on powershell:
+A monitoring tool designed to detect **file deletions, rollbacks
+(version reverts), and unexpected changes** in large directory trees.
 
-''' 
+This project was created to investigate cases where files on a shared
+storage portal were:
 
+-   reverting to older versions
+-   disappearing unexpectedly
+-   being modified without clear traceability
+
+The system performs scheduled scans of a directory tree and records file
+metadata and content fingerprints. Results are stored and compared
+against previous runs to detect anomalies.
+
+The system is designed to handle **very large multi‑terabyte directory
+structures efficiently**.
+
+------------------------------------------------------------------------
+
+# Architecture
+
+The system is composed of three main components:
+
+1.  **Python Scanner**
+2.  **n8n Workflow**
+3.  **SQLite State Database**
+
+The workflow is illustrated below.
+
+![Workflow Diagram](n8n.jpg)
+
+### Execution Flow
+
+    n8n Schedule Trigger
+            ↓
+    Execute Command Node
+            ↓
+    Python Scanner (watch_s_drive.py)
+            ↓
+    JSON result printed to stdout
+            ↓
+    JavaScript Code Node parses output
+            ↓
+    Report files written to disk
+            ↓
+    Optional alerts for high severity events
+
+------------------------------------------------------------------------
+
+# What the Program Detects
+
+The scanner detects the following events:
+
+  -----------------------------------------------------------------------
+  Event Type                          Description
+  ----------------------------------- -----------------------------------
+  **missing**                         A file previously present no longer
+                                      exists
+
+  **changed**                         File contents changed to a new
+                                      version
+
+  **reverted**                        File contents match an **older
+                                      previously recorded version**
+
+  **mtime_went_back**                 File modification timestamp moved
+                                      backwards
+  -----------------------------------------------------------------------
+
+High severity alerts typically include:
+
+-   deleted files
+-   reverted file versions
+
+------------------------------------------------------------------------
+
+# Performance Design
+
+The scanner is optimized for **very large file systems**.
+
+Key performance techniques:
+
+### Metadata-first scanning
+
+The scanner initially collects only:
+
+-   path
+-   size
+-   modification time
+
+Hashing is performed **only when metadata indicates a change**.
+
+### Partial hashing
+
+Large files are hashed using:
+
+    first N bytes + last N bytes + file size
+
+instead of hashing the entire file.
+
+### Parallel hashing
+
+Hash calculations are executed using:
+
+    --max-workers 6
+
+This significantly speeds up scanning without overwhelming storage I/O.
+
+### Directory pruning
+
+Directories are excluded early during traversal to avoid unnecessary
+scanning.
+
+Examples:
+
+-   directories starting with numbers
+-   archive folders
+-   system folders
+
+------------------------------------------------------------------------
+
+# Repository Structure
+
+    project/
+    │
+    ├── watch_s_drive.py
+    │     Python scanner
+    │
+    ├── reports/
+    │     Output reports and latest run JSON
+    │
+    ├── n8n.png
+    │     Workflow diagram
+    │
+    └── README.md
+
+------------------------------------------------------------------------
+
+# Installation
+
+## Install Node.js
+
+Download from:
+
+https://nodejs.org/
+
+## Install n8n
+
+``` bash
+npm install n8n -g
+```
+
+------------------------------------------------------------------------
+
+# Running n8n
+
+Set environment variables before starting.
+
+PowerShell:
+
+``` powershell
 $env:NODES_EXCLUDE='[]'
-
 
 $env:N8N_RESTRICT_FILE_ACCESS_TO="C:\...\project\file_check;C:\...\reports"
 
-
 n8n start
+```
 
-'''
+Open the n8n interface:
 
-view on: http://localhost:5678
+    http://localhost:5678
 
+------------------------------------------------------------------------
 
+# Python Scanner Execution
 
-Execute command cmd for windows: cmd /c python "C:\...\file_check\watch_s_drive.py" --root "C:\\" --max-workers 6 --no-hash-new-files --latest-json "C:\...\file_check\reports\latest.json"
+Example command used in the **Execute Command** node:
 
+``` bash
+cmd /c python "C:\...\file_check\watch_s_drive.py" ^
+    --root "C:\\" ^
+    --max-workers 6 ^
+    --no-hash-new-files ^
+    --latest-json "C:\...\file_check\reports\latest.json"
+```
 
-the javascript:
-"
+### Arguments
 
+  Argument                Description
+  ----------------------- ------------------------------------------
+  `--root`                Root directory to scan
+  `--max-workers`         Number of threads used for hashing
+  `--no-hash-new-files`   Skip hashing for newly discovered files
+  `--latest-json`         Path where latest run summary is written
 
-const stdout = ($json.stdout || '').trim();
-const stderr = ($json.stderr || '').trim();
-const exitCode = $json.exitCode;
+------------------------------------------------------------------------
 
-function makeErrorReport(title, details) {
-  const lines = [];
-  lines.push(title);
-  lines.push(`Time (local): ${new Date().toISOString()}`);
-  lines.push(`Exit code: ${exitCode}`);
-  lines.push('');
-  lines.push('Details:');
-  lines.push(details);
-  lines.push('');
-  if (stderr) {
-    lines.push('stderr:');
-    lines.push(stderr.slice(0, 4000));
+# Output Files
+
+### JSON summary
+
+`reports/latest.json`
+
+Contains:
+
+-   run id
+-   scan statistics
+-   list of detected events
+
+Example:
+
+``` json
+{
+  "run_id": "2026-03-06T01-00",
+  "root": "S:\\",
+  "stats": {
+    "scanned_files": 145233,
+    "hashed_files": 431,
+    "events": 2,
+    "high": 1
   }
-  if (stdout) {
-    lines.push('');
-    lines.push('stdout (preview):');
-    lines.push(stdout.slice(0, 2000));
-  }
-  return lines.join('\r\n');
 }
+```
 
-if (!stdout) {
-  const ops_report = makeErrorReport('ERROR: No stdout from Python run', 'The command produced no stdout output.');
-  const payload = { ok: false, exitCode, stderr, ops_report };
-  payload.full_json_text = JSON.stringify(payload, null, 2);
-  return [{ json: payload }];
-}
+### CSV report
 
-let data;
-try {
-  data = JSON.parse(stdout);
-} catch (e) {
-  const ops_report = makeErrorReport('ERROR: Failed to parse JSON from stdout', String(e));
-  const payload = { ok: false, exitCode, stderr, parseError: String(e), ops_report };
-  payload.full_json_text = JSON.stringify(payload, null, 2);
-  return [{ json: payload }];
-}
+    events_<runid>.csv
 
-// success path: build report
-const high = data.stats?.high ?? 0;
-const events = Array.isArray(data.events) ? data.events : [];
+Contains all detected events for the run.
 
-const lines = [];
-lines.push(`File Watch Run: ${data.run_id}`);
-lines.push(`Started (UTC): ${data.started_at_utc}`);
-lines.push(`Root: ${data.root}`);
-lines.push(`Scanned files: ${data.stats?.scanned_files ?? '?'}`);
-lines.push(`Hashed files: ${data.stats?.hashed_files ?? '?'}`);
-lines.push(`Events: ${data.stats?.events ?? 0} (high=${high}, medium=${data.stats?.medium ?? 0}, low=${data.stats?.low ?? 0})`);
-lines.push(`CSV: ${data.reports?.events_csv ?? ''}`);
-lines.push('');
+------------------------------------------------------------------------
 
-if (high > 0) {
-  lines.push('HIGH SEVERITY EVENTS (up to 50):');
-  events.filter(e => e.severity === 'high').slice(0, 50).forEach(e => {
-    lines.push(`- ${e.type}: ${e.path || e.old_path || ''}`);
-  });
-} else {
-  lines.push('No high severity events detected.');
-}
+# Quick Start (5 Minute Setup)
 
-data.ok = true;
-data.ops_report = lines.join('\r\n');
-data.full_json_text = JSON.stringify(data, null, 2);
+1.  Install **Node.js**
+2.  Install **n8n**
 
-return [{ json: data }];
+```{=html}
+<!-- -->
+```
+    npm install n8n -g
 
+3.  Clone this repository
 
-"
+```{=html}
+<!-- -->
+```
+    git clone https://github.com/yourusername/file_integrity_check.git
 
+4.  Start n8n
 
+```{=html}
+<!-- -->
+```
+    n8n start
 
+5.  Open the n8n UI
+
+```{=html}
+<!-- -->
+```
+    http://localhost:5678
+
+6.  Import the workflow and configure the **Execute Command node** to
+    run:
+
+```{=html}
+<!-- -->
+```
+    python watch_s_drive.py --root "S:\" --max-workers 6 --no-hash-new-files --latest-json "reports/latest.json"
+
+7.  Run the workflow manually once to verify output.
+
+------------------------------------------------------------------------
+
+# Troubleshooting
+
+## S: Drive Not Found
+
+If the script runs as a service or under n8n, the `S:\` mapped drive may
+not exist.
+
+Use the **UNC path instead**:
+
+    \\server\share
+
+Example:
+
+    --root "\\server\share"
+
+Mapped drives are tied to user sessions and may not be visible to
+services.
+
+------------------------------------------------------------------------
+
+## n8n Cannot Access Files
+
+If n8n cannot read or write files, check the environment variable:
+
+    N8N_RESTRICT_FILE_ACCESS_TO
+
+Example:
+
+    $env:N8N_RESTRICT_FILE_ACCESS_TO="C:\project\file_check;C:\reports"
+
+This restricts file access to specific directories for security.
+
+------------------------------------------------------------------------
+
+## Python Script Produces No Output
+
+If the n8n node reports:
+
+    ERROR: No stdout from Python run
+
+Check:
+
+-   Python path is correct
+-   Script runs manually
+-   Output JSON is printed to stdout
+
+Test manually:
+
+    python watch_s_drive.py --root "S:\"
+
+------------------------------------------------------------------------
+
+## Slow Scans
+
+For very large file systems:
+
+-   reduce hashing using
+
+```{=html}
+<!-- -->
+```
+    --no-hash-new-files
+
+-   reduce worker threads
+
+```{=html}
+<!-- -->
+```
+    --max-workers 4
+
+-   exclude archive directories
+
+This greatly improves performance.
+
+------------------------------------------------------------------------
+
+# Use Cases
+
+This system is useful for:
+
+-   detecting silent data corruption
+-   identifying unintended file version rollbacks
+-   auditing large shared storage environments
+-   monitoring research or production data directories
+
+------------------------------------------------------------------------
+
+# License
+
+MIT License
