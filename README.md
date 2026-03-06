@@ -70,6 +70,7 @@ The scanner detects the following events:
 
   **mtime_went_back**                 File modification timestamp moved
                                       backwards
+                                      
   -----------------------------------------------------------------------
 
 High severity alerts typically include:
