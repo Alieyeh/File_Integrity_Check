@@ -54,17 +54,28 @@ The system consists of three main components:
 
 # What the Program Detects
 
-  Event             Description
-  ----------------- ------------------------------------------------
-  missing           File previously present is now gone
-  changed           File contents changed to a new version
-  reverted          File reverted to a previously recorded version
-  mtime_went_back   File modification timestamp moved backwards
+The scanner detects the following events:
 
-High severity alerts normally include:
+  -----------------------------------------------------------------------
+  Event Type                          Description
+  ----------------------------------- -----------------------------------
+  **missing**                         A file previously present no longer
+                                      exists
+
+  **changed**                         File contents changed to a new
+                                      version
+
+  **reverted**                        File contents match an **older
+                                      previously recorded version**
+
+  **mtime_went_back**                 File modification timestamp moved
+                                      backwards
+  -----------------------------------------------------------------------
+
+High severity alerts typically include:
 
 -   deleted files
--   reverted versions
+-   reverted file versions
 
 ------------------------------------------------------------------------
 
