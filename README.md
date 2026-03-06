@@ -167,6 +167,10 @@ Open:
 
 # Python Scanner Execution
 
+Update the Execute Command node to match your environment:
+
+--root "S:\"
+
 Example command used in the **Execute Command node**:
 
     cmd /c python "C:\...\file_check\watch_s_drive.py" ^
@@ -183,12 +187,6 @@ Example command used in the **Execute Command node**:
   --max-workers         Number of hashing threads
   --no-hash-new-files   Skip hashing for new files
   --latest-json         Path for latest run summary
-  
-
-Update the Execute Command node to match your environment:
-
---root "S:\"
-
 
 ------------------------------------------------------------------------
 
