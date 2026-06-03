@@ -1,33 +1,112 @@
 # File Integrity Monitor
 
-Python-only replacement for the n8n file integrity workflow in
-`reports/workflow/FileIntegrityCheckWorkflow.json`.
+A Python-only file and directory integrity monitor for secure research
+environments, large Windows shares, and offline portals. It replaces the n8n
+workflow exported at `reports/workflow/FileIntegrityCheckWorkflow.json` while
+keeping the same operational intent: scan, compare with previous state,
+classify risk, and write clear operator reports.
 
-It preserves the workflow capabilities:
+The runtime uses only the Python standard library. There are no runtime package
+dependencies, no internet calls, and no external assets in the generated HTML
+reports.
 
-- scans a root folder recursively with directory exclusions
-- keeps SQLite state between runs
-- selectively fingerprints files with configurable hashing
-- detects missing files, changed files, metadata-only changes, reverted content, and older mtimes
-- writes per-run event CSV files
-- writes `reports/latest.json`
-- writes `reports/STATUS_latest.txt` when no critical/high-severity events are found
-- writes dated alert files and archived run JSON when critical/high-severity events are found
-- writes polished offline HTML reports with severity color coding and likelihood summaries
-- writes dated error reports when the run fails
-- can run once from the CLI or repeat on a Python scheduler loop
-- skips folders whose name starts with a number by default
-- can read extra excluded directory names from a simple text file
-- deduplicates fingerprint history and keeps compact JSON reports by default
+## At A Glance
 
-The implementation uses only the Python standard library at runtime.
+| Area | What It Does |
+| --- | --- |
+| State | Stores file, directory, fingerprint, and metadata history in SQLite |
+| Scale | Supports metadata-first scanning for millions of very large files |
+| TRE mode | `--no-hash-new-files` avoids opening new or fingerprint-missing files |
+| Reversion | Exact fingerprint reversion is critical; metadata-only approximation is also available |
+| Reports | Writes offline HTML, text summaries, CSV event exports, and compact JSON |
+| Scheduling | Can run once, repeat on a Python loop, or be scheduled weekly by the platform |
+| Exclusions | Skips numbered folders by default and supports a non-coder editable exclusions file |
+
+## Workflow
+
+```mermaid
+flowchart LR
+    A["Scan root"] --> B["Apply exclusions"]
+    B --> C["Collect file + directory metadata"]
+    C --> D{"Hashing enabled or needed?"}
+    D -->|Yes| E["Sample fingerprint files"]
+    D -->|No| F["Keep metadata-only evidence"]
+    E --> G["Compare with SQLite state"]
+    F --> G
+    G --> H["Classify events + likelihoods"]
+    H --> I["Write reports"]
+    I --> J["Persist latest state + history"]
+```
+
+The scan records both files and directories. Directory deletion can therefore be
+reported even when a folder was empty.
+
+## Risk Model
+
+The human report uses a color-coded ladder. Exact intent is never presented as
+proof; these labels are review priorities based on filesystem evidence.
+
+| Alert | Typical Meaning | Examples |
+| --- | --- | --- |
+| Extremely High | Fingerprint-proven version reversion | Current fingerprint matches an older historical fingerprint for the same path |
+| High | Likely deletion/unavailability or stronger metadata reversion signal | File disappeared, directory disappeared, file returned to previous size+mtime, directory returned to previous mtime+child-count state |
+| Medium | Review item with material operational impact | Content changed, metadata changed without fingerprint evidence, moved file, moved and renamed file, directory move/rename, size-only metadata reversion pattern |
+| Low | Lower priority integrity signal | Same-folder file rename, modified time moved backwards |
+| Clear | No alert-level integrity events detected | No events |
+
+### Move And Rename Definitions
+
+| Classification | Definition | Risk |
+| --- | --- | --- |
+| Likely renamed | Same folder, different file name | Low |
+| Likely moved | Same file name, different folder/location | Medium |
+| Likely moved and renamed | Different folder/location and different file name | Medium |
+
+Moves are ranked above same-folder renames because a location change has more
+operational impact. Same-folder cleanup such as `draft 2.md` to `draft2.md` is
+treated as a likely rename.
+
+## Detection Coverage
+
+| Signal | Requires Fingerprint? | Notes |
+| --- | --- | --- |
+| File deletion or unavailability | No | Path missing from latest scan |
+| Directory deletion or unavailability | No | Directory paths are baselined directly, including empty directories |
+| Same-folder file rename | No | Uses filename-equivalent signatures, size, and folder evidence |
+| File move or moved-and-renamed | Better with fingerprint, possible without | Fingerprints give high confidence; metadata gives lower confidence |
+| Directory move or rename | No | Uses directory path/name/location evidence |
+| Content changed | Yes | Compares current fingerprint with previous fingerprint |
+| Exact version reversion | Yes | Current fingerprint matches an older historical fingerprint |
+| Possible file metadata reversion | No | Uses compact size/mtime history when fingerprint coverage is absent |
+| Possible directory metadata reversion | No | Uses compact directory mtime and immediate child-count history |
+| Modified time moved backwards | No | Low-risk timestamp signal |
+
+The report shows `Reversion unprotected` for current files that do not yet have
+fingerprint coverage. Those files can still produce metadata-based warnings, but
+exact content reversion detection requires fingerprints.
+
+## Event Name Reference
+
+The CSV and JSON outputs use stable event names:
+
+| Event Type | Typical Alert | Meaning |
+| --- | --- | --- |
+| `missing` | High, Medium, or Low | A known file path disappeared; may be deletion, unavailability, rename, move, or moved-and-renamed |
+| `directory_missing` | High or Medium | A known directory path disappeared; may be deletion, unavailability, rename, or move |
+| `changed` | Medium | Fingerprint changed from the previous known fingerprint |
+| `metadata_changed` | Medium | Size or modified time changed but the file lacks prior fingerprint evidence |
+| `reverted` | Extremely High | Current fingerprint matches a previous historical fingerprint |
+| `possible_metadata_reverted` | High or Medium | File metadata returned to a previous size/mtime or size-only pattern |
+| `possible_directory_metadata_reverted` | High or Medium | Directory metadata returned to a previous mtime/child-count or child-count-only pattern |
+| `mtime_went_back` | Low | Modified time is older than the previous recorded modified time |
 
 ## Requirements
 
 - Python 3.10 or newer
-- Windows, macOS, or Linux. The defaults are tuned for Windows shares.
+- Windows, macOS, or Linux
+- Write access to the SQLite database path and report output directory
 
-Check that Python is visible:
+Check Python:
 
 ```powershell
 python --version
@@ -35,9 +114,9 @@ python --version
 
 If Windows cannot find `python`, install Python from
 [python.org](https://www.python.org/downloads/windows/) and enable
-"Add python.exe to PATH", or use the Python Launcher command `py`.
+`Add python.exe to PATH`, or use the Python Launcher command `py`.
 
-## Quick Start
+## Installation
 
 From this folder:
 
@@ -59,23 +138,48 @@ Or use the compatibility wrapper without installing the package:
 python .\file_check.py --root "S:\" --max-workers 6 --no-hash-new-files
 ```
 
-Run only the scanner, matching the old n8n Execute Command step:
+Scanner-only compatibility wrapper:
 
 ```powershell
 python .\watch_s_drive.py --root "S:\" --max-workers 6 --no-hash-new-files --latest-json ".\reports\latest.json"
 ```
 
+## Recommended TRE Mode
+
+For very large shares with millions of multi-GB or multi-TB files, start with a
+metadata-first baseline:
+
+```powershell
+file-watch run --root "S:\" --no-hash-new-files --max-workers 6 --history-retention-per-path 5 --json-detail compact
+```
+
+This creates a path, directory, and metadata baseline without opening new or
+fingerprint-missing files for hashing. Later runs still detect missing files,
+missing directories, moves, renames, metadata changes, and possible metadata
+reversion patterns.
+
+For folders where exact version reversion detection is required immediately, run
+an approved maintenance pass:
+
+```powershell
+file-watch run --root "S:\" --hash-new-files --max-workers 6
+```
+
+That pass fingerprints brand-new files and backfills missing fingerprints. It is
+more expensive and should be scheduled only when the TRE has approved the I/O
+cost.
+
 ## Exclusions
 
 By default, the scanner skips:
 
-- any folder whose name starts with a number, such as `2023` or `1_old`
+- folders whose name starts with a number, such as `2023` or `1_old`
 - common system/build folders such as `$RECYCLE.BIN`, `.git`, `node_modules`, `Archive`, and `Backups`
 - the default full path prefixes `S:\Archive`, `S:\Backups`, and `S:\OldProjects`
 
 Use `--include-numbered-dirs` if numbered folders should be scanned.
 
-For non-coders, create a plain text file such as `config\exclude_dirs.txt`:
+For non-coders, maintain a plain text file such as `config\exclude_dirs.txt`:
 
 ```text
 # One directory name per line
@@ -90,16 +194,42 @@ Then run:
 file-watch run --root "S:\" --exclude-file ".\config\exclude_dirs.txt" --max-workers 6 --no-hash-new-files
 ```
 
-The file also supports optional advanced lines:
+Advanced entries are also supported:
 
 ```text
 dir: ExactFolderName
 prefix: S:\A\Whole\Subtree\To\Skip
 ```
 
-## Output Files
+## Output Layout
 
-The complete workflow writes:
+`file-watch run` creates the report root and these standard subfolders if they
+do not already exist:
+
+```text
+reports\
+  events\
+  human\
+  status\
+  alerts\
+  archive\
+  errors\
+```
+
+`file-watch scan` creates the output directory and `events` folder as needed for
+CSV output.
+
+```mermaid
+flowchart TD
+    R["reports/"]
+    R --> L["latest.json"]
+    R --> H["HUMAN_latest.html"]
+    R --> E["events/events_<run_id>.csv"]
+    R --> S["status/STATUS_<run_id>.txt + .html"]
+    R --> A["alerts/ALERT_<run_id>.txt + .html"]
+    R --> AR["archive/run_<run_id>.json"]
+    R --> ER["errors/error_<date>.txt + .html"]
+```
 
 | Path | When | Purpose |
 | --- | --- | --- |
@@ -109,92 +239,24 @@ The complete workflow writes:
 | `reports/events/events_<run_id>.csv` | every scan | flat event report |
 | `reports/STATUS_latest.txt` | success with no critical/high events | operator status summary |
 | `reports/STATUS_latest.html` | success with no critical/high events | visual status report |
-| `reports/status/STATUS_<run_id>.txt` | success with no critical/high events | archived run-specific status summary |
-| `reports/status/STATUS_<run_id>.html` | success with no critical/high events | archived run-specific visual status report |
-| `reports/alerts/ALERT_<run_id>.txt` | success with critical/high events | archived run-specific alert report |
-| `reports/alerts/ALERT_<run_id>.html` | success with critical/high events | archived run-specific visual alert report |
-| `reports/ALERT_latest.txt` | success with critical/high events | easy-to-open latest alert |
-| `reports/ALERT_latest.html` | success with critical/high events | easy-to-open latest visual alert |
-| `reports/archive/run_<run_id>.json` | critical/high events by default | archived full JSON payload |
+| `reports/status/STATUS_<run_id>.txt` | success with no critical/high events | archived status summary |
+| `reports/status/STATUS_<run_id>.html` | success with no critical/high events | archived visual status report |
+| `reports/alerts/ALERT_<run_id>.txt` | success with critical/high events | archived alert report |
+| `reports/alerts/ALERT_<run_id>.html` | success with critical/high events | archived visual alert report |
+| `reports/ALERT_latest.txt` | success with critical/high events | latest alert shortcut |
+| `reports/ALERT_latest.html` | success with critical/high events | latest visual alert shortcut |
+| `reports/archive/run_<run_id>.json` | critical/high events by default | archived JSON payload |
 | `reports/errors/error_<date>.txt` | operational failure | error report |
 | `reports/errors/error_<date>.html` | operational failure | visual error report |
 
-The `*_latest` files are only convenience shortcuts. The durable weekly/audit
-records are the run-specific files containing `<run_id>` in their names.
-Older top-level `reports/events_*.csv` files are moved into `reports/events`
-automatically on the next scan.
-If the report directory does not exist, `file-watch run` creates the report root
-and standard subfolders: `events`, `human`, `status`, `alerts`, `archive`, and
-`errors`.
+`*_latest` files are convenience shortcuts. Run-specific files containing
+`<run_id>` are the durable audit records. Older top-level
+`reports/events_*.csv` files are moved into `reports/events` automatically on
+the next scan.
 
-Extremely high-severity events are version reversions and are prioritised above
-deletions. High-severity events are likely file or directory
-deletion/unavailability. Medium review items are likely moves, likely moved-and-
-renamed files or directories, and content changes. Low review items are likely
-same-folder file renames and timestamp-only signals where mtimes went backwards.
+## CLI Reference
 
-## Alert Levels and Likelihoods
-
-The human report has a clear alert banner:
-
-- `Extremely High Risk`: version reversion, prioritised above deletion/unavailability
-- `High Risk`: likely file or directory deletion/unavailability
-- `Review`: likely move, likely moved-and-renamed, content changed, or metadata changed without fingerprint evidence; check against expected activity
-- `Low`: likely same-folder rename or timestamp-only signal
-- `Clear`: no alert-level integrity events detected
-
-Each event includes:
-
-- action likelihood, such as `Likely deleted or currently unavailable`, `Likely renamed`, `Likely moved`, `Likely moved and renamed`, or `Version reversion detected`
-- action confidence, based on fingerprint or metadata evidence
-- intent signal, such as `Indeterminate`, `Could be accidental or planned reorganisation`, or `More consistent with intentional or bulk action`
-- target kind, so direct directory events and directory-level missing-file patterns stand out from single-file issues
-
-Intent is never presented as proof. The tool uses filesystem evidence to
-prioritise review, then the data owner, audit trail, or approved change record
-should confirm what happened.
-
-All version reversions are classified as extremely high risk.
-
-Likely move/rename detection uses these definitions:
-
-- `Likely renamed`: the file is still in the same folder, but the file name changed.
-- `Likely moved`: the file name is the same, but the folder/location changed.
-- `Likely moved and renamed`: both the folder/location and file name changed.
-
-Moves are ranked higher than same-folder renames because a location change has
-more operational impact. A same-folder rename is still recorded for review, but
-it is low risk rather than a high alert.
-
-The scanner uses fingerprint matches when available. It also checks same-folder
-filename-equivalent changes, ignoring case, spaces, and punctuation, so
-`draft 2.md` to `draft2.md` is treated as a likely rename.
-
-Directories are baselined directly in SQLite. That means a removed directory can
-be reported even when it was empty or contained too few files to create a
-directory-level missing-file pattern. A directory rename or move is treated as a
-medium review item rather than a high alert when the scan finds a plausible new
-directory path. The scanner also keeps compact directory metadata history. If a
-directory returns to a previously observed modified timestamp and immediate
-child-file/child-directory count, it writes a high
-`possible_directory_metadata_reverted` event. If only the immediate child-count
-shape returns, it writes a medium lower-confidence
-`possible_directory_metadata_reverted` event.
-
-Exact version reversion detection requires historical fingerprints. When a file
-is metadata-only, the scanner still keeps a compact metadata history. If the
-file returns to a previously observed size and modified timestamp, the scanner
-writes a high `possible_metadata_reverted` event. If it only returns to a
-previously observed size, the scanner writes a medium lower-confidence
-`possible_metadata_reverted` event. If its size or modified time changes without
-matching previous metadata, the scanner writes a medium `metadata_changed` event
-instead of silently accepting the change. The human report also shows
-`Reversion unprotected`, which is the number of current files that do not yet
-have fingerprint coverage.
-
-## CLI
-
-### Complete workflow
+### Complete Workflow
 
 ```powershell
 file-watch run --root "S:\" [options]
@@ -210,7 +272,7 @@ Useful options:
 --no-hash-new-files               store new or fingerprint-missing files without hashing them
 --max-workers N                   hashing workers, default 6
 --sample-bytes N                  bytes sampled from each end of large files
---history-retention-per-path N    unique fingerprints retained per path, default 5; 0 keeps all
+--history-retention-per-path N    unique history states retained per path, default 5; 0 keeps all
 --exclude-dir NAME                add an excluded directory name
 --exclude-prefix PATH             add an excluded path subtree
 --exclude-file PATH               read extra exclusions from a plain text file
@@ -221,16 +283,16 @@ Useful options:
 --fail-on-high                    return exit code 1 when critical/high events exist
 ```
 
-### Scanner only
+### Scanner Only
 
 ```powershell
 file-watch scan --root "S:\" --latest-json ".\reports\latest.json"
 ```
 
-`scan` prints the raw scan JSON and writes the events CSV. It does not write
-status, alert, archive, or error files.
+`scan` prints raw scan JSON and writes the events CSV. It does not write status,
+alert, archive, or error reports.
 
-### Repeat without n8n
+### Repeat Without n8n
 
 ```powershell
 file-watch schedule --root "S:\" --interval-seconds 3600 --max-workers 6 --no-hash-new-files
@@ -238,22 +300,25 @@ file-watch schedule --root "S:\" --interval-seconds 3600 --max-workers 6 --no-ha
 
 Use `--runs N` to stop after a fixed number of runs.
 
-### Weekly Monday mornings
+### Weekly Monday Mornings
 
-For a pure-Python long-running process:
+Pure-Python weekly loop:
 
 ```powershell
 file-watch weekly --root "S:\" --weekday monday --time 09:00 --max-workers 6 --no-hash-new-files
 ```
 
-To check the next scheduled run without scanning:
+Dry run the next scheduled time:
 
 ```powershell
 file-watch weekly --root "S:\" --weekday monday --time 09:00 --dry-run
 ```
 
-For a secure portal, a platform scheduler is usually preferable. On Windows,
-configure Task Scheduler to run every Monday at 09:00 with:
+For a secure portal, a platform scheduler is usually preferable.
+
+## Windows Task Scheduler
+
+After installing with `python -m pip install -e .`, create a task:
 
 ```text
 Program/script: C:\Path\To\Project\.venv\Scripts\file-watch.exe
@@ -261,79 +326,71 @@ Arguments: run --root "S:\" --max-workers 6 --no-hash-new-files --exclude-file "
 Start in: C:\Alieyeh\project\file_check
 ```
 
-## Recommended First Run
-
-For very large shares, start with:
-
-```powershell
-file-watch run --root "S:\" --no-hash-new-files --max-workers 6
-```
-
-That creates the initial path, directory, and metadata baseline quickly. Later
-runs detect missing files and directories without backfilling missing
-fingerprints. Files that have never been fingerprinted remain metadata-only
-until you deliberately run with `--hash-new-files`.
-
-If you need revert detection immediately for existing files, run a maintenance
-baseline with:
-
-```powershell
-file-watch run --root "S:\" --hash-new-files --max-workers 6
-```
-
-This is more expensive because it fingerprints brand-new baseline files.
-It also backfills fingerprints for files that were previously observed in
-metadata-only mode.
-
-## Storage Efficiency
-
-SQLite storage is kept compact by default:
-
-- `latest_by_path` stores one current row per tracked file path.
-- `latest_directories` stores one current row per tracked directory path,
-  including empty directories.
-- `latest_by_path.seen_count` records how many times each current file path has
-  been observed, even when the file remains metadata-only.
-- `history_by_path` stores unique fingerprints per path instead of inserting a
-  duplicate row every time the same fingerprint is seen again.
-- `history_by_path.seen_count` records how many times a known fingerprint was
-  observed.
-- `metadata_history_by_path` stores compact unique size/mtime states per path so
-  metadata-only runs can flag possible metadata reversion patterns without
-  opening huge files.
-- `directory_history_by_path` stores compact unique directory mtime and
-  immediate child-count states so directory metadata reversion patterns can be
-  flagged.
-- In `--no-hash-new-files` mode, missing fingerprints are not treated as a
-  reason to hash on the second or later observation. The JSON/report stats show
-  `metadata_only_files`, `reversion_unprotected_files`, and
-  `skipped_missing_fingerprint_hashes`.
-- `--history-retention-per-path 5` keeps the latest five unique fingerprints per
-  path by default. Use `0` to keep all historical fingerprints.
-- Saved `latest.json` and archived run JSON use `--json-detail compact` by
-  default. Detailed event data is still available in the CSV and HTML reports.
-- Use `--json-detail full` when you explicitly need full event detail embedded
-  in saved JSON.
-
-## Windows Task Scheduler
-
-After installing with `python -m pip install -e .`, create a task that runs:
-
-```text
-Program/script: C:\Path\To\Project\.venv\Scripts\file-watch.exe
-Arguments: run --root "S:\" --max-workers 6 --no-hash-new-files
-Start in: C:\Alieyeh\project\file_check
-```
-
 Set the trigger to weekly, Monday, 09:00 or the portal-approved morning window.
 
-If you do not install the package, schedule the wrapper instead:
+If you do not install the package, schedule the wrapper:
 
 ```text
 Program/script: C:\Path\To\Python\python.exe
-Arguments: C:\Alieyeh\project\file_check\file_check.py --root "S:\" --max-workers 6 --no-hash-new-files
+Arguments: C:\Alieyeh\project\file_check\file_check.py --root "S:\" --max-workers 6 --no-hash-new-files --exclude-file ".\config\exclude_dirs.txt"
 Start in: C:\Alieyeh\project\file_check
 ```
+
+## Storage Model
+
+SQLite is designed to stay compact:
+
+| Table | Purpose |
+| --- | --- |
+| `latest_by_path` | one current row per tracked file path |
+| `latest_directories` | one current row per tracked directory path, including empty directories |
+| `history_by_path` | unique fingerprint states per path |
+| `metadata_history_by_path` | unique file size/mtime states per path |
+| `directory_history_by_path` | unique directory mtime and immediate child-count states per path |
+| `runs` | run audit records |
+
+Additional storage behavior:
+
+- `latest_by_path.seen_count` records how many times each current file path has been observed.
+- fingerprint history is deduplicated by path and fingerprint.
+- metadata history is deduplicated by path and metadata state.
+- `--history-retention-per-path 5` keeps the latest five unique states per path by default.
+- `--history-retention-per-path 0` keeps all retained history.
+- saved JSON uses `--json-detail compact` by default; detailed evidence remains in CSV and HTML reports.
+- use `--json-detail full` only when full embedded event detail is required in JSON.
+
+## Hashing Policy
+
+With `--no-hash-new-files`:
+
+- new files are stored without fingerprints.
+- files with missing fingerprints remain metadata-only on later observations.
+- missing fingerprints are not a reason to open large files for hash backfill.
+- metadata-only changes generate review events when size or mtime changes.
+- possible file metadata reversion uses prior size/mtime history.
+
+With `--hash-new-files`:
+
+- new files are fingerprinted.
+- missing fingerprints are backfilled.
+- future exact content-change and version-reversion checks become available for those paths.
+
+Large-file hashing is sampled. Files up to `2 * --sample-bytes` are read fully;
+larger files read the first and last sample only. The default sample size is
+1 MB, so a large file reads about 2 MB when hashing is enabled.
+
+## Trusted Research Environment Notes
+
+The project is suitable for a secure trusted research environment with no direct
+internet access:
+
+- runtime code uses only Python standard library modules.
+- installation can be performed with `pip` from an approved source folder or wheel.
+- reports are offline HTML with embedded CSS and no external assets.
+- generated reports and SQLite state may contain sensitive paths and filenames; store them in an approved secure location.
+- export the empty `file_watch_state.sqlite3` created by this repository only after clearing local data.
+
+More deployment detail is in [docs/TRE_DEPLOYMENT.md](docs/TRE_DEPLOYMENT.md).
 
 ## Tests
 
@@ -347,18 +404,22 @@ No external test dependencies are required.
 
 ## Migration From n8n
 
-The old n8n command was:
+Old n8n scanner command:
 
 ```powershell
 cmd /c python ".\watch_s_drive.py" --root "<SCAN_ROOT>" --max-workers 6 --no-hash-new-files --latest-json ".\reports\latest.json"
 ```
 
-The Python-only equivalent is:
+Python-only complete workflow:
 
 ```powershell
 python .\file_check.py --root "<SCAN_ROOT>" --max-workers 6 --no-hash-new-files
 ```
 
-See [docs/MIGRATION_FROM_N8N.md](docs/MIGRATION_FROM_N8N.md) for the node-by-node mapping.
+Installed console script:
 
-For locked-down portal deployment notes, see [docs/TRE_DEPLOYMENT.md](docs/TRE_DEPLOYMENT.md).
+```powershell
+file-watch run --root "<SCAN_ROOT>" --max-workers 6 --no-hash-new-files
+```
+
+See [docs/MIGRATION_FROM_N8N.md](docs/MIGRATION_FROM_N8N.md) for the node-by-node mapping.
