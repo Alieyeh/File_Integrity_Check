@@ -10,6 +10,8 @@ The runtime uses only the Python standard library. There are no runtime package
 dependencies, no internet calls, and no external assets in the generated HTML
 reports.
 
+![Risk priority ladder](docs/assets/readme-risk-ladder.svg)
+
 ## At A Glance
 
 | Area | What It Does |
@@ -21,6 +23,13 @@ reports.
 | Reports | Writes offline HTML, text summaries, CSV event exports, and compact JSON |
 | Scheduling | Can run once, repeat on a Python loop, or be scheduled weekly by the platform |
 | Exclusions | Skips numbered folders by default and supports a non-coder editable exclusions file |
+
+> [!NOTE]
+> For large TRE shares, the recommended default is metadata-first scanning with
+> `--no-hash-new-files`. Exact reversion detection becomes available for paths
+> once fingerprinting has been approved and captured.
+
+---
 
 ## Workflow
 
@@ -36,10 +45,23 @@ flowchart LR
     G --> H["Classify events + likelihoods"]
     H --> I["Write reports"]
     I --> J["Persist latest state + history"]
+
+    classDef scan fill:#f1e9ff,stroke:#8b3a9c,color:#25142f;
+    classDef metadata fill:#e9f0ff,stroke:#3156a3,color:#25142f;
+    classDef hash fill:#fff8d6,stroke:#8a6a00,color:#25142f;
+    classDef report fill:#e6f5ee,stroke:#24744f,color:#25142f;
+    classDef risk fill:#fff3e0,stroke:#b54708,color:#25142f;
+    class A,B scan;
+    class C,F metadata;
+    class D,E hash;
+    class G,H risk;
+    class I,J report;
 ```
 
 The scan records both files and directories. Directory deletion can therefore be
 reported even when a folder was empty.
+
+---
 
 ## Risk Model
 
@@ -85,6 +107,11 @@ The report shows `Reversion unprotected` for current files that do not yet have
 fingerprint coverage. Those files can still produce metadata-based warnings, but
 exact content reversion detection requires fingerprints.
 
+> [!IMPORTANT]
+> Fingerprint-proven `reverted` events are the highest priority because they
+> show that content has returned to a previously observed fingerprint. Metadata
+> reversion events are useful approximations, not proof.
+
 ## Event Name Reference
 
 The CSV and JSON outputs use stable event names:
@@ -99,6 +126,8 @@ The CSV and JSON outputs use stable event names:
 | `possible_metadata_reverted` | High or Medium | File metadata returned to a previous size/mtime or size-only pattern |
 | `possible_directory_metadata_reverted` | High or Medium | Directory metadata returned to a previous mtime/child-count or child-count-only pattern |
 | `mtime_went_back` | Low | Modified time is older than the previous recorded modified time |
+
+---
 
 ## Requirements
 
@@ -157,6 +186,11 @@ This creates a path, directory, and metadata baseline without opening new or
 fingerprint-missing files for hashing. Later runs still detect missing files,
 missing directories, moves, renames, metadata changes, and possible metadata
 reversion patterns.
+
+> [!CAUTION]
+> `--no-hash-new-files` protects storage performance, but exact content
+> reversion detection needs historical fingerprints. Use targeted maintenance
+> fingerprinting for the folders where exact reversion detection matters most.
 
 For folders where exact version reversion detection is required immediately, run
 an approved maintenance pass:
@@ -229,6 +263,19 @@ flowchart TD
     R --> A["alerts/ALERT_<run_id>.txt + .html"]
     R --> AR["archive/run_<run_id>.json"]
     R --> ER["errors/error_<date>.txt + .html"]
+
+    classDef root fill:#f1e9ff,stroke:#8b3a9c,color:#25142f;
+    classDef latest fill:#e9f0ff,stroke:#3156a3,color:#25142f;
+    classDef clear fill:#e6f5ee,stroke:#24744f,color:#25142f;
+    classDef alert fill:#fff3e0,stroke:#b54708,color:#25142f;
+    classDef archive fill:#fff8d6,stroke:#8a6a00,color:#25142f;
+    classDef error fill:#fff0ed,stroke:#b42318,color:#25142f;
+    class R root;
+    class L,H,E latest;
+    class S clear;
+    class A alert;
+    class AR archive;
+    class ER error;
 ```
 
 | Path | When | Purpose |
@@ -253,6 +300,8 @@ flowchart TD
 `<run_id>` are the durable audit records. Older top-level
 `reports/events_*.csv` files are moved into `reports/events` automatically on
 the next scan.
+
+---
 
 ## CLI Reference
 
@@ -359,6 +408,8 @@ Additional storage behavior:
 - saved JSON uses `--json-detail compact` by default; detailed evidence remains in CSV and HTML reports.
 - use `--json-detail full` only when full embedded event detail is required in JSON.
 
+---
+
 ## Hashing Policy
 
 With `--no-hash-new-files`:
@@ -389,6 +440,11 @@ internet access:
 - reports are offline HTML with embedded CSS and no external assets.
 - generated reports and SQLite state may contain sensitive paths and filenames; store them in an approved secure location.
 - export the empty `file_watch_state.sqlite3` created by this repository only after clearing local data.
+
+> [!TIP]
+> For TRE transfer, include the source code, `config`, `docs`, tests, and an
+> empty `file_watch_state.sqlite3`. Do not transfer local generated reports
+> unless they have been reviewed for sensitive paths.
 
 More deployment detail is in [docs/TRE_DEPLOYMENT.md](docs/TRE_DEPLOYMENT.md).
 
