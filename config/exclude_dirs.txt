@@ -1,0 +1,12 @@
+# Extra directories to skip.
+# Add one directory name per line. Matching is by exact folder name anywhere in the tree.
+
+# Examples:
+# Drafts
+# TempUploads
+# DoNotScan
+
+# Advanced optional forms:
+# dir: AnotherFolderName
+# prefix: S:\A\Whole\Subtree\To\Skip
+

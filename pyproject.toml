@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "file-integrity-monitor"
+version = "0.1.0"
+description = "Python-only file integrity scanner and n8n workflow replacement."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "File Integrity Monitor maintainers" }
+]
+license = { text = "Proprietary" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: System :: Monitoring",
+]
+dependencies = []
+
+[project.scripts]
+file-watch = "file_integrity_monitor.cli:main"
+file-integrity = "file_integrity_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
