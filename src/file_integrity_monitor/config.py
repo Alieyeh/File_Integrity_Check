@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from .progress import ProgressCallback
+
 
 DEFAULT_EXCLUDED_DIR_NAMES = frozenset(
     {
@@ -103,6 +105,8 @@ class ExclusionConfig:
         exclude_files: Iterable[Path] | None,
         include_numbered_dirs: bool,
     ) -> "ExclusionConfig":
+        """Merge default, file-based, and command-line exclusion rules."""
+
         names = set() if clear_defaults else set(DEFAULT_EXCLUDED_DIR_NAMES)
         prefixes = [] if clear_defaults else list(DEFAULT_EXCLUDED_PATH_PREFIXES)
 
@@ -139,6 +143,11 @@ class ScanSettings:
     hash_new_files: bool = True
     history_retention_per_path: int = 5
     exclusions: ExclusionConfig = field(default_factory=ExclusionConfig)
+    progress_callback: ProgressCallback | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 @dataclass(frozen=True)

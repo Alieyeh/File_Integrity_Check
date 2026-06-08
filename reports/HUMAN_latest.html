@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File Integrity Report - 20260608T151512949738+0000</title>
+  <style>
+    :root {
+      --ink: #25142f;
+      --muted: #765c86;
+      --line: #ded0f0;
+      --panel: #fffbff;
+      --bg: #f1e9ff;
+      --critical: #b42318;
+      --critical-soft: #fff0ed;
+      --high: #b54708;
+      --high-soft: #fff3e0;
+      --medium: #8a6a00;
+      --medium-soft: #fff8d6;
+      --low: #3156a3;
+      --low-soft: #e9f0ff;
+      --clear: #24744f;
+      --clear-soft: #e6f5ee;
+      --accent: #8b3a9c;
+      --accent-soft: #f5d8f0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.45;
+    }
+    .page { max-width: 1180px; margin: 0 auto; padding: 28px; }
+    .hero {
+      color: #fff;
+      background: linear-gradient(135deg, #5b2b69, #b83280);
+      border-radius: 10px;
+      padding: 28px;
+      box-shadow: 0 16px 38px rgba(94, 30, 100, 0.18);
+    }
+    .hero.critical { background: linear-gradient(135deg, #8f1d15, #c83a2e); }
+    .hero.high { background: linear-gradient(135deg, #8a3f06, #d65f00); }
+    .hero.medium { background: linear-gradient(135deg, #735600, #b78a00); }
+    .hero.low { background: linear-gradient(135deg, #194185, #175cd3); }
+    .hero.clear { background: linear-gradient(135deg, #14532d, #23814b); }
+    .eyebrow { text-transform: uppercase; letter-spacing: 0.08em; font-size: 12px; opacity: 0.84; }
+    h1 { margin: 8px 0 6px; font-size: 34px; line-height: 1.1; }
+    h2 { margin: 0 0 14px; font-size: 20px; }
+    .subtitle { margin: 0; opacity: 0.9; }
+    .grid { display: grid; gap: 16px; }
+    .metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 18px 0; }
+    .two { grid-template-columns: 1fr 1fr; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 8px 22px rgba(94, 30, 100, 0.08);
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--accent);
+      background: linear-gradient(180deg, #fffaff, #ffffff);
+      border-radius: 8px;
+      padding: 14px 16px;
+      min-height: 88px;
+      box-shadow: 0 8px 20px rgba(94, 30, 100, 0.08);
+    }
+    .metric.critical { border-color: #f3c7c1; border-top-color: var(--critical); background: linear-gradient(180deg, var(--critical-soft), #fff); }
+    .metric.high { border-color: #f2d0a8; border-top-color: var(--high); background: linear-gradient(180deg, var(--high-soft), #fff); }
+    .metric.medium { border-color: #eadb91; border-top-color: var(--medium); background: linear-gradient(180deg, var(--medium-soft), #fff); }
+    .metric.low { border-color: #ccd8f2; border-top-color: var(--low); background: linear-gradient(180deg, var(--low-soft), #fff); }
+    .metric.clear { border-color: #c4e3d2; border-top-color: var(--clear); background: linear-gradient(180deg, var(--clear-soft), #fff); }
+    .metric-label { display: block; color: var(--muted); font-size: 13px; }
+    .metric strong { display: block; margin-top: 4px; font-size: 28px; }
+    .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 22px; margin-top: 14px; }
+    .fact-label { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+    .fact-value { overflow-wrap: anywhere; }
+    .bar-row { display: grid; grid-template-columns: minmax(160px, 1fr) 2fr 44px; gap: 10px; align-items: center; margin: 10px 0; }
+    .bar-label { overflow-wrap: anywhere; }
+    .bar-track { height: 12px; background: #f0d7ee; border-radius: 999px; overflow: hidden; }
+    .bar-track span { display: block; height: 100%; background: linear-gradient(90deg, #a855b5, #db4a95); }
+    .bar-count { text-align: right; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; }
+    th { color: #5b2b69; background: #f9eafa; font-size: 12px; text-transform: uppercase; }
+    .pill { display: inline-block; border-radius: 999px; padding: 3px 9px; font-weight: 700; }
+    .pill.critical { color: var(--critical); background: var(--critical-soft); }
+    .pill.high { color: var(--high); background: var(--high-soft); }
+    .pill.medium { color: var(--medium); background: var(--medium-soft); }
+    .pill.low { color: var(--low); background: var(--low-soft); }
+    .muted { color: var(--muted); }
+    .note { border-left: 4px solid #a855b5; padding-left: 12px; color: #5b2b69; }
+    @media (max-width: 880px) {
+      .metrics, .two, .facts { grid-template-columns: 1fr; }
+      .page { padding: 16px; }
+      h1 { font-size: 28px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero low">
+      <div class="eyebrow">File integrity monitor</div>
+      <h1>Low</h1>
+      <p class="subtitle">Low-risk rename or timestamp signals found</p>
+      <div class="facts">
+        <div><div class="fact-label">Run ID</div><div class="fact-value">20260608T151512949738+0000</div></div>
+        <div><div class="fact-label">Started UTC</div><div class="fact-value">2026-06-08T15:15:12+00:00</div></div>
+        <div><div class="fact-label">Root</div><div class="fact-value">c:\alieyeh\project\rwds</div></div>
+        <div><div class="fact-label">CSV</div><div class="fact-value">C:\Alieyeh\project\file_check\reports\events\events_20260608T151512949738+0000.csv</div></div>
+      </div>
+    </section>
+
+    <section class="grid metrics">
+      <div class="metric critical"><span class="metric-label">Extreme risk</span><strong>0</strong></div>
+      <div class="metric high"><span class="metric-label">High risk</span><strong>0</strong></div>
+      <div class="metric medium"><span class="metric-label">Medium risk</span><strong>0</strong></div>
+      <div class="metric low"><span class="metric-label">Low risk</span><strong>1</strong></div>
+      <div class="metric clear"><span class="metric-label">Scanned files</span><strong>18</strong></div>
+    </section>
+
+    <section class="grid two">
+      <div class="panel">
+        <h2>Lay Summary</h2>
+        <p>This run scanned 18 files and found 1 event(s): 0 medium-risk and 1 low-risk. No high-risk missing event or extremely high-risk reversion was detected. 18 file(s) are metadata-only, so exact version reversion detection is not available for them until fingerprints are captured.</p>
+        <p class="note">Intent likelihood is an evidence signal, not proof. Use it to prioritise review, then confirm with the data owner, audit trail, or approved change record.</p>
+      </div>
+      <div class="panel">
+        <h2>Run Profile</h2>
+        <div class="facts">
+          <div><div class="fact-label">Hashed files</div><div class="fact-value">0</div></div>
+          <div><div class="fact-label">Metadata-only files</div><div class="fact-value">18</div></div>
+          <div><div class="fact-label">Reversion unprotected</div><div class="fact-value">18</div></div>
+          <div><div class="fact-label">Skipped hash backfills</div><div class="fact-value">17</div></div>
+          <div><div class="fact-label">Scanned directories</div><div class="fact-value">8</div></div>
+          <div><div class="fact-label">Duration seconds</div><div class="fact-value">0.007</div></div>
+          <div><div class="fact-label">Events</div><div class="fact-value">1</div></div>
+          <div><div class="fact-label">Database</div><div class="fact-value">C:\Alieyeh\project\file_check\file_watch_state.sqlite3</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid two" style="margin-top:16px">
+      <div class="panel">
+        <h2>Event Mix</h2>
+        
+            <div class="bar-row">
+              <div class="bar-label">missing</div>
+              <div class="bar-track"><span style="width: 100.0%"></span></div>
+              <div class="bar-count">1</div>
+            </div>
+            
+      </div>
+      <div class="panel">
+        <h2>Action Likelihood</h2>
+        
+            <div class="bar-row">
+              <div class="bar-label">Likely renamed</div>
+              <div class="bar-track"><span style="width: 100.0%"></span></div>
+              <div class="bar-count">1</div>
+            </div>
+            
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:16px">
+      <h2>Directory-Level Signals</h2>
+      <table>
+        <thead><tr><th>Directory</th><th>Missing files</th><th>Possible new paths</th><th>Action likelihood</th><th>Confidence</th><th>Intent signal</th></tr></thead>
+        <tbody><tr><td colspan="6" class="muted">No direct directory disappearance or directory-level missing-file pattern detected.</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="panel" style="margin-top:16px">
+      <h2>Prioritised Event Review</h2>
+      <table>
+        <thead><tr><th>Alert</th><th>Type</th><th>Action likelihood</th><th>Confidence</th><th>Intent signal</th><th>Path</th><th>Review note</th></tr></thead>
+        <tbody><tr><td><span class="pill low">Low</span></td><td>missing</td><td>Likely renamed</td><td>high</td><td>Could be accidental or planned reorganisation</td><td>c:\alieyeh\project\rwds\draft 2.md<br><span class="muted">Possible new path: c:\alieyeh\project\rwds\draft_2.md</span></td><td>Intent cannot be proven from filesystem metadata; confirm with the data owner or change record.</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

@@ -15,6 +15,8 @@ from .scanner import ScanError, scan_files
 
 @dataclass(frozen=True)
 class PipelineResult:
+    """Outcome returned by the complete workflow runner."""
+
     payload: dict[str, Any]
     exit_code: int
     written_files: tuple[Path, ...]
@@ -45,6 +47,8 @@ def _latest_json_path(settings: PipelineSettings) -> Path | None:
 
 
 def ensure_report_layout(reports_dir: Path) -> None:
+    """Create the standard report directory tree when it is absent."""
+
     reports_dir.mkdir(parents=True, exist_ok=True)
     for name in REPORT_SUBDIRS:
         (reports_dir / name).mkdir(parents=True, exist_ok=True)
@@ -83,6 +87,8 @@ def _ensure_reports(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_ops_report(data: dict[str, Any]) -> str:
+    """Build the concise human-readable text report for operators."""
+
     critical = _stats_value(data, "critical")
     high = _stats_value(data, "high")
     medium = _stats_value(data, "medium")
@@ -172,6 +178,8 @@ def make_error_report(
     stdout: str = "",
     stderr: str = "",
 ) -> str:
+    """Build a bounded plain-text diagnostic report."""
+
     lines = [
         title,
         f"Time (local): {datetime.now().isoformat(timespec='seconds')}",
@@ -213,6 +221,8 @@ def _event_sample(events: list[Any], *, limit: int = 100) -> list[Any]:
 
 
 def compact_payload(payload: dict[str, Any], *, event_limit: int = 100) -> dict[str, Any]:
+    """Return a JSON-friendly payload with a bounded event sample."""
+
     compact = dict(payload)
     events = compact.get("events")
     if isinstance(events, list):
@@ -226,6 +236,8 @@ def compact_payload(payload: dict[str, Any], *, event_limit: int = 100) -> dict[
 
 
 def payload_for_json(payload: dict[str, Any], *, json_detail: str) -> dict[str, Any]:
+    """Apply the requested compact or full JSON detail policy."""
+
     if json_detail == "full":
         full = dict(payload)
         full["json_detail"] = "full"
@@ -263,10 +275,17 @@ def _local_date_stamp() -> str:
 
 
 def run_pipeline(settings: PipelineSettings) -> PipelineResult:
+    """Run scanning and produce the complete operator report set."""
+
     reports_dir = _reports_dir(settings)
-    ensure_report_layout(reports_dir)
     latest_json = _latest_json_path(settings)
     written: list[Path] = []
+    try:
+        ensure_report_layout(reports_dir)
+    except OSError as exc:
+        message = f"Cannot create report layout at {str(reports_dir)!r}: {exc}"
+        payload = _error_payload(message, exit_code=1)
+        return PipelineResult(payload=payload, exit_code=1, written_files=())
 
     try:
         summary = scan_files(settings.scan)

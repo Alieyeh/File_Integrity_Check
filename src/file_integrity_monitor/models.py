@@ -49,6 +49,8 @@ class Event:
     details: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the stable JSON representation used in reports."""
+
         return {
             "type": self.type,
             "severity": self.severity,

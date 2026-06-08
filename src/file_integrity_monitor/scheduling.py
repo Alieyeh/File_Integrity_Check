@@ -22,6 +22,8 @@ WEEKDAYS = {
 
 
 def parse_weekday(value: str) -> int:
+    """Parse a full or abbreviated weekday name into Python's weekday index."""
+
     try:
         return WEEKDAYS[value.strip().lower()]
     except KeyError as exc:
@@ -30,6 +32,8 @@ def parse_weekday(value: str) -> int:
 
 
 def parse_time_of_day(value: str) -> time:
+    """Parse a strict 24-hour HH:MM local time."""
+
     parts = value.strip().split(":")
     if len(parts) != 2:
         raise ValueError("Time must use HH:MM in 24-hour format.")
@@ -46,6 +50,8 @@ def parse_time_of_day(value: str) -> time:
 
 
 def next_weekly_run(now: datetime, *, weekday: int, at_time: time) -> datetime:
+    """Calculate the next weekly occurrence strictly after ``now``."""
+
     if now.tzinfo is not None:
         target = datetime.combine(date=now.date(), time=at_time, tzinfo=now.tzinfo)
     else:
@@ -56,4 +62,3 @@ def next_weekly_run(now: datetime, *, weekday: int, at_time: time) -> datetime:
     if target <= now:
         target = target + timedelta(days=7)
     return target
-

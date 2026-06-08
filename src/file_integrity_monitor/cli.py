@@ -4,12 +4,14 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
 from .config import ExclusionConfig, PipelineSettings, ScanSettings
 from .pipeline import run_pipeline
+from .progress import ProgressCallback, TerminalProgress
 from .scanner import ScanError, scan_files
 from .scheduling import next_weekly_run, parse_time_of_day, parse_weekday
 
@@ -28,13 +30,21 @@ def _add_common_scan_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--exclude-file", action="append", default=[], help="Plain text file of extra directory names to skip.")
     parser.add_argument("--clear-default-exclusions", action="store_true", help="Use only exclusions passed on the CLI.")
     parser.add_argument("--include-numbered-dirs", action="store_true", help="Do not skip directories beginning with a digit.")
+    parser.add_argument("--no-progress", action="store_true", help="Disable the interactive terminal progress bar.")
 
     hash_group = parser.add_mutually_exclusive_group()
     hash_group.add_argument("--hash-new-files", dest="hash_new_files", action="store_true", help="Fingerprint new files and backfill missing fingerprints.")
     hash_group.add_argument("--no-hash-new-files", dest="hash_new_files", action="store_false", help="Store new or fingerprint-missing files without hashing them.")
 
 
-def _settings_from_args(args: argparse.Namespace, *, default_hash_new_files: bool) -> ScanSettings:
+def _settings_from_args(
+    args: argparse.Namespace,
+    *,
+    default_hash_new_files: bool,
+    progress_callback: ProgressCallback | None = None,
+) -> ScanSettings:
+    """Build validated scan settings from parsed CLI arguments."""
+
     hash_new_files = args.hash_new_files
     if hash_new_files is None:
         hash_new_files = default_hash_new_files
@@ -58,6 +68,7 @@ def _settings_from_args(args: argparse.Namespace, *, default_hash_new_files: boo
         hash_new_files=hash_new_files,
         history_retention_per_path=args.history_retention_per_path,
         exclusions=exclusions,
+        progress_callback=progress_callback,
     )
 
 
@@ -66,6 +77,8 @@ def _print_payload(payload: dict[str, object], *, indent: int | None) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the complete command-line parser."""
+
     parser = argparse.ArgumentParser(
         prog="file-watch",
         description="Python-only file integrity monitor and n8n workflow replacement.",
@@ -116,48 +129,70 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_once(args: argparse.Namespace) -> int:
+    progress = TerminalProgress(enabled=False if args.no_progress else None)
     try:
-        scan_settings = _settings_from_args(args, default_hash_new_files=False)
+        scan_settings = _settings_from_args(
+            args,
+            default_hash_new_files=False,
+            progress_callback=progress,
+        )
     except (FileNotFoundError, ValueError) as exc:
+        progress.fail(str(exc))
         _print_payload({"ok": False, "error": str(exc)}, indent=getattr(args, "json_indent", None))
         return 2
     if scan_settings.latest_json is None:
-        scan_settings = ScanSettings(
-            root=scan_settings.root,
-            db=scan_settings.db,
-            outdir=scan_settings.outdir,
+        scan_settings = replace(
+            scan_settings,
             latest_json=Path(scan_settings.outdir) / "latest.json",
-            algo=scan_settings.algo,
-            sample_bytes=scan_settings.sample_bytes,
-            max_workers=scan_settings.max_workers,
-            hash_new_files=scan_settings.hash_new_files,
-            history_retention_per_path=scan_settings.history_retention_per_path,
-            exclusions=scan_settings.exclusions,
         )
-    result = run_pipeline(
-        PipelineSettings(
-            scan=scan_settings,
-            archive_policy=args.archive_policy,
-            fail_on_high=args.fail_on_high,
-            write_root_alert_latest=not args.no_root_alert_latest,
-            json_detail=args.json_detail,
+    try:
+        result = run_pipeline(
+            PipelineSettings(
+                scan=scan_settings,
+                archive_policy=args.archive_policy,
+                fail_on_high=args.fail_on_high,
+                write_root_alert_latest=not args.no_root_alert_latest,
+                json_detail=args.json_detail,
+            )
         )
-    )
+    except Exception as exc:
+        message = f"Workflow failed before a report could be completed: {exc}"
+        progress.fail(message)
+        _print_payload({"ok": False, "error": message}, indent=args.json_indent)
+        return 1
+
+    if result.payload.get("ok"):
+        progress.finish(int(result.payload.get("stats", {}).get("scanned_files", 0)))
+    else:
+        progress.fail(str(result.payload.get("error", "Workflow failed.")))
     _print_payload(result.payload, indent=args.json_indent)
     return result.exit_code
 
 
 def _scan_once(args: argparse.Namespace) -> int:
+    progress = TerminalProgress(enabled=False if args.no_progress else None)
     try:
-        settings = _settings_from_args(args, default_hash_new_files=True)
+        settings = _settings_from_args(
+            args,
+            default_hash_new_files=True,
+            progress_callback=progress,
+        )
     except (FileNotFoundError, ValueError) as exc:
+        progress.fail(str(exc))
         _print_payload({"error": str(exc)}, indent=args.json_indent)
         return 2
     try:
         payload = scan_files(settings)
     except ScanError as exc:
+        progress.fail(str(exc))
         _print_payload({"error": str(exc)}, indent=args.json_indent)
         return exc.exit_code
+    except Exception as exc:
+        message = f"Scan failed unexpectedly: {exc}"
+        progress.fail(message)
+        _print_payload({"error": message}, indent=args.json_indent)
+        return 1
+    progress.finish(int(payload.get("stats", {}).get("scanned_files", 0)))
     _print_payload(payload, indent=args.json_indent)
     return 0
 
@@ -213,6 +248,8 @@ def _weekly(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the requested CLI command and return a process exit code."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

@@ -15,6 +15,7 @@ from typing import Iterable
 
 from .config import ExclusionConfig, ScanSettings
 from .models import DirectoryMeta, Event, FileMeta, FileState
+from .progress import ProgressCallback, ProgressUpdate
 
 
 class ScanError(RuntimeError):
@@ -98,10 +99,14 @@ CREATE INDEX IF NOT EXISTS idx_meta_hist_path_id ON metadata_history_by_path(pat
 
 
 def utc_now_iso() -> str:
+    """Return the current UTC time in a stable, second-precision ISO format."""
+
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def make_run_id(now: datetime | None = None) -> str:
+    """Create a sortable, collision-resistant identifier for one scan run."""
+
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
@@ -110,10 +115,14 @@ def make_run_id(now: datetime | None = None) -> str:
 
 
 def normalize_path(path: os.PathLike[str] | str) -> str:
+    """Return the platform-normalized absolute form used as a database key."""
+
     return os.path.normcase(os.path.abspath(os.fspath(path)))
 
 
 def normalize_prefix(path: os.PathLike[str] | str) -> str:
+    """Normalize an exclusion prefix without a trailing path separator."""
+
     return normalize_path(path).rstrip("\\/")
 
 
@@ -127,6 +136,8 @@ def should_exclude_dir(
     exclusions: ExclusionConfig,
     normalized_prefixes: tuple[str, ...] | None = None,
 ) -> bool:
+    """Return whether a directory should be pruned before traversal."""
+
     if (
         exclusions.exclude_dirs_starting_with_digit
         and dir_name
@@ -176,17 +187,22 @@ def iter_files_scandir(root: os.PathLike[str] | str, exclusions: ExclusionConfig
                                 size=int(stat.st_size),
                                 mtime_utc=int(stat.st_mtime),
                             )
-                    except (OSError, PermissionError):
-                        continue
-        except (OSError, PermissionError):
-            continue
+                    except OSError as exc:
+                        raise ScanError(
+                            f"Cannot inspect filesystem entry {entry.path!r}: {exc}"
+                        ) from exc
+        except OSError as exc:
+            raise ScanError(f"Cannot list directory {current_dir!r}: {exc}") from exc
 
 
 def collect_tree_scandir(
     root: os.PathLike[str] | str,
     exclusions: ExclusionConfig,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    estimated_file_total: int | None = None,
 ) -> tuple[dict[str, FileMeta], dict[str, DirectoryMeta]]:
-    """Collect file and directory metadata in one pruned traversal."""
+    """Collect metadata in one traversal and fail if any entry is unreadable."""
 
     root_path = os.fspath(root)
     stack = [root_path]
@@ -194,6 +210,8 @@ def collect_tree_scandir(
     normalized_prefixes = _normalise_prefixes(exclusions.path_prefixes)
     files: dict[str, FileMeta] = {}
     directories: dict[str, DirectoryMeta] = {}
+    issues: list[str] = []
+    progress_interval = 250
 
     while stack:
         current_dir = stack.pop()
@@ -209,7 +227,8 @@ def collect_tree_scandir(
                     child_files=0,
                     child_dirs=0,
                 )
-        except (OSError, PermissionError):
+        except OSError as exc:
+            issues.append(f"cannot read directory metadata for {current_dir!r}: {exc}")
             continue
 
         try:
@@ -235,9 +254,23 @@ def collect_tree_scandir(
                             )
                             files[file_meta.path] = file_meta
                             child_files += 1
-                    except (OSError, PermissionError):
+                            if progress_callback and (
+                                len(files) == 1 or len(files) % progress_interval == 0
+                            ):
+                                progress_callback(
+                                    ProgressUpdate(
+                                        phase="Scanning",
+                                        current=len(files),
+                                        total=estimated_file_total,
+                                        estimated=estimated_file_total is not None,
+                                        message=f"{len(directories):,} directories found",
+                                    )
+                                )
+                    except OSError as exc:
+                        issues.append(f"cannot inspect filesystem entry {entry.path!r}: {exc}")
                         continue
-        except (OSError, PermissionError):
+        except OSError as exc:
+            issues.append(f"cannot list directory {current_dir!r}: {exc}")
             continue
 
         current_norm = normalize_path(current_dir)
@@ -250,6 +283,25 @@ def collect_tree_scandir(
                 child_dirs=child_dirs,
             )
 
+    if issues:
+        preview = "; ".join(issues[:3])
+        remaining = len(issues) - min(len(issues), 3)
+        suffix = f"; plus {remaining} more issue(s)" if remaining else ""
+        raise ScanError(
+            "Filesystem scan was incomplete, so the baseline was not updated. "
+            f"Encountered {len(issues)} inaccessible or changed entry/entries: "
+            f"{preview}{suffix}"
+        )
+
+    if progress_callback:
+        progress_callback(
+            ProgressUpdate(
+                phase="Scanning",
+                current=len(files),
+                total=len(files),
+                message=f"{len(directories):,} directories found",
+            )
+        )
     return files, directories
 
 
@@ -260,30 +312,31 @@ def compute_fingerprint(
     algo: str = "sha256",
     sample_bytes: int = 1024 * 1024,
 ) -> str:
-    """Compute a content fingerprint using full hashing for small files."""
+    """Compute a full or sampled content fingerprint for one file."""
 
     hasher = hashlib.new(algo)
     hasher.update(str(size).encode("utf-8"))
-    try:
-        with open(path, "rb") as handle:
-            if size <= 2 * sample_bytes:
-                while True:
-                    chunk = handle.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    hasher.update(chunk)
-            else:
-                hasher.update(handle.read(sample_bytes))
-                handle.seek(max(0, size - sample_bytes))
-                hasher.update(handle.read(sample_bytes))
-    except (OSError, PermissionError):
-        hasher.update(b"UNREADABLE")
+    with open(path, "rb") as handle:
+        if size <= 2 * sample_bytes:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        else:
+            hasher.update(handle.read(sample_bytes))
+            handle.seek(max(0, size - sample_bytes))
+            hasher.update(handle.read(sample_bytes))
     return hasher.hexdigest()
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:
+    """Open, initialize, and migrate the SQLite state database."""
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(db_path))
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute("PRAGMA temp_store = MEMORY")
     connection.executescript(SCHEMA_SQL)
     _migrate_db(connection)
     return connection
@@ -358,11 +411,35 @@ def _migrate_db(connection: sqlite3.Connection) -> None:
     )
     connection.execute("CREATE INDEX IF NOT EXISTS idx_hist_path_id ON history_by_path(path, id)")
     _deduplicate_history(connection)
+    _deduplicate_signature_history(
+        connection,
+        table="metadata_history_by_path",
+        key_columns=("path", "size", "mtime_utc"),
+    )
+    _deduplicate_signature_history(
+        connection,
+        table="directory_history_by_path",
+        key_columns=("path", "mtime_utc", "child_files", "child_dirs"),
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_hist_path_fp "
+        "ON history_by_path(path, fingerprint)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_hist_path_signature "
+        "ON metadata_history_by_path(path, size, mtime_utc)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_dir_hist_path_signature "
+        "ON directory_history_by_path(path, mtime_utc, child_files, child_dirs)"
+    )
     _drop_legacy_empty_tables(connection)
     connection.commit()
 
 
 def _deduplicate_history(connection: sqlite3.Connection) -> None:
+    """Merge legacy duplicate fingerprint history rows before indexing."""
+
     connection.execute(
         """
         UPDATE history_by_path
@@ -405,7 +482,61 @@ def _deduplicate_history(connection: sqlite3.Connection) -> None:
         )
 
 
+def _deduplicate_signature_history(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    key_columns: tuple[str, ...],
+) -> None:
+    """Merge legacy duplicate metadata signatures before adding uniqueness."""
+
+    allowed = {
+        "metadata_history_by_path": ("path", "size", "mtime_utc"),
+        "directory_history_by_path": (
+            "path",
+            "mtime_utc",
+            "child_files",
+            "child_dirs",
+        ),
+    }
+    if allowed.get(table) != key_columns:
+        raise ValueError(f"Unsupported history deduplication target: {table}")
+
+    keys_sql = ", ".join(key_columns)
+    groups = connection.execute(
+        f"""
+        SELECT {keys_sql}, MIN(id), SUM(COALESCE(seen_count, 1))
+        FROM {table}
+        GROUP BY {keys_sql}
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    where_sql = " AND ".join(f"{column} = ?" for column in key_columns)
+    for *key_values, keep_id, total_seen_count in groups:
+        latest_run = connection.execute(
+            f"""
+            SELECT run_id
+            FROM {table}
+            WHERE {where_sql}
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            key_values,
+        ).fetchone()
+        if latest_run:
+            connection.execute(
+                f"UPDATE {table} SET run_id = ?, seen_count = ? WHERE id = ?",
+                (latest_run[0], int(total_seen_count), int(keep_id)),
+            )
+        connection.execute(
+            f"DELETE FROM {table} WHERE {where_sql} AND id <> ?",
+            (*key_values, int(keep_id)),
+        )
+
+
 def _drop_legacy_empty_tables(connection: sqlite3.Connection) -> None:
+    """Remove obsolete empty tables left by early development versions."""
+
     tables = {
         row[0]
         for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -419,6 +550,8 @@ def _drop_legacy_empty_tables(connection: sqlite3.Connection) -> None:
 
 
 def load_latest_by_path(connection: sqlite3.Connection) -> dict[str, FileState]:
+    """Load the current file baseline keyed by normalized absolute path."""
+
     cursor = connection.cursor()
     cursor.execute("SELECT path, size, mtime_utc, fingerprint, seen_count FROM latest_by_path")
     latest: dict[str, FileState] = {}
@@ -435,6 +568,8 @@ def load_latest_by_path(connection: sqlite3.Connection) -> dict[str, FileState]:
 
 
 def load_latest_directories(connection: sqlite3.Connection) -> dict[str, DirectoryMeta]:
+    """Load the current directory baseline keyed by normalized absolute path."""
+
     cursor = connection.cursor()
     cursor.execute("SELECT path, mtime_utc, child_files, child_dirs FROM latest_directories")
     latest: dict[str, DirectoryMeta] = {}
@@ -453,6 +588,8 @@ def fingerprint_seen_before(
     path: str,
     fingerprint: str,
 ) -> bool:
+    """Return whether this exact fingerprint was previously stored for a path."""
+
     cursor = connection.cursor()
     cursor.execute(
         "SELECT 1 FROM history_by_path WHERE path = ? AND fingerprint = ? LIMIT 1",
@@ -467,6 +604,8 @@ def metadata_signature_seen_before(
     size: int,
     mtime_utc: int,
 ) -> bool:
+    """Return whether an exact size and mtime pair was seen for a path."""
+
     cursor = connection.cursor()
     cursor.execute(
         """
@@ -485,6 +624,8 @@ def metadata_size_seen_before(
     path: str,
     size: int,
 ) -> bool:
+    """Return whether a file path previously had the supplied size."""
+
     cursor = connection.cursor()
     cursor.execute(
         """
@@ -505,6 +646,8 @@ def directory_signature_seen_before(
     child_files: int,
     child_dirs: int,
 ) -> bool:
+    """Return whether exact directory metadata was previously observed."""
+
     cursor = connection.cursor()
     cursor.execute(
         """
@@ -524,6 +667,8 @@ def directory_shape_seen_before(
     child_files: int,
     child_dirs: int,
 ) -> bool:
+    """Return whether directory child counts were previously observed."""
+
     cursor = connection.cursor()
     cursor.execute(
         """
@@ -901,6 +1046,8 @@ def persist_run(
     scanned_count: int,
     duration_s: float,
 ) -> None:
+    """Stage one audit record in the current SQLite transaction."""
+
     connection.execute(
         """
         INSERT INTO runs(run_id, started_at_utc, root, scanned_count, duration_s)
@@ -908,9 +1055,6 @@ def persist_run(
         """,
         (run_id, started_at_utc, root, int(scanned_count), float(duration_s)),
     )
-    connection.commit()
-
-
 def upsert_latest_and_history(
     connection: sqlite3.Connection,
     run_id: str,
@@ -918,54 +1062,59 @@ def upsert_latest_and_history(
     *,
     history_retention_per_path: int,
 ) -> None:
-    cursor = connection.cursor()
-    touched_history_paths: set[str] = set()
-    for path, size, mtime_utc, fingerprint in items:
-        cursor.execute(
-            """
-            INSERT INTO latest_by_path(
-                path, size, mtime_utc, fingerprint, last_seen_run_id, first_seen_run_id, seen_count
-            )
-            VALUES(?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(path) DO UPDATE SET
-                size = excluded.size,
-                mtime_utc = excluded.mtime_utc,
-                fingerprint = COALESCE(excluded.fingerprint, latest_by_path.fingerprint),
-                last_seen_run_id = excluded.last_seen_run_id,
-                first_seen_run_id = COALESCE(latest_by_path.first_seen_run_id, excluded.first_seen_run_id),
-                seen_count = latest_by_path.seen_count + 1
-            """,
-            (path, size, mtime_utc, fingerprint, run_id, run_id),
-        )
+    """Batch current file state and deduplicated fingerprint history."""
 
-        if fingerprint is not None:
-            cursor.execute(
-                """
-                UPDATE history_by_path
-                SET mtime_utc = ?,
-                    size = ?,
-                    run_id = ?,
-                    seen_count = seen_count + 1
-                WHERE path = ? AND fingerprint = ?
-                """,
-                (mtime_utc, size, run_id, path, fingerprint),
-            )
-            if cursor.rowcount == 0:
-                cursor.execute(
-                    """
-                    INSERT INTO history_by_path(
-                        path, fingerprint, mtime_utc, size, run_id, first_seen_run_id, seen_count
-                    )
-                    VALUES(?, ?, ?, ?, ?, ?, 1)
-                    """,
-                    (path, fingerprint, mtime_utc, size, run_id, run_id),
-                )
-            touched_history_paths.add(path)
-    prune_history(connection, touched_history_paths, history_retention_per_path)
-    connection.commit()
+    item_list = list(items)
+    if not item_list:
+        return
+
+    cursor = connection.cursor()
+    cursor.executemany(
+        """
+        INSERT INTO latest_by_path(
+            path, size, mtime_utc, fingerprint, last_seen_run_id, first_seen_run_id, seen_count
+        )
+        VALUES(?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(path) DO UPDATE SET
+            size = excluded.size,
+            mtime_utc = excluded.mtime_utc,
+            fingerprint = COALESCE(excluded.fingerprint, latest_by_path.fingerprint),
+            last_seen_run_id = excluded.last_seen_run_id,
+            first_seen_run_id = COALESCE(latest_by_path.first_seen_run_id, excluded.first_seen_run_id),
+            seen_count = latest_by_path.seen_count + 1
+        """,
+        [
+            (path, size, mtime_utc, fingerprint, run_id, run_id)
+            for path, size, mtime_utc, fingerprint in item_list
+        ],
+    )
+
+    fingerprint_items = [
+        (path, fingerprint, mtime_utc, size, run_id, run_id)
+        for path, size, mtime_utc, fingerprint in item_list
+        if fingerprint is not None
+    ]
+    cursor.executemany(
+        """
+        INSERT INTO history_by_path(
+            path, fingerprint, mtime_utc, size, run_id, first_seen_run_id, seen_count
+        )
+        VALUES(?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(path, fingerprint) DO UPDATE SET
+            mtime_utc = excluded.mtime_utc,
+            size = excluded.size,
+            run_id = excluded.run_id,
+            seen_count = history_by_path.seen_count + 1
+        """,
+        fingerprint_items,
+    )
+    if fingerprint_items:
+        prune_history(connection, history_retention_per_path)
 
 
 def delete_latest_paths(connection: sqlite3.Connection, paths: Iterable[str]) -> None:
+    """Remove paths that were absent from the completed scan."""
+
     cursor = connection.cursor()
     cursor.executemany(
         "DELETE FROM latest_by_path WHERE path = ?",
@@ -978,6 +1127,8 @@ def upsert_latest_directories(
     run_id: str,
     directories: Iterable[DirectoryMeta],
 ) -> None:
+    """Batch the latest directory metadata."""
+
     cursor = connection.cursor()
     cursor.executemany(
         """
@@ -1009,32 +1160,26 @@ def upsert_metadata_history(
     *,
     history_retention_per_path: int,
 ) -> None:
-    cursor = connection.cursor()
-    touched_paths: set[str] = set()
-    for path, size, mtime_utc in items:
-        cursor.execute(
-            """
-            UPDATE metadata_history_by_path
-            SET run_id = ?,
-                seen_count = seen_count + 1
-            WHERE path = ? AND size = ? AND mtime_utc = ?
-            """,
-            (run_id, path, int(size), int(mtime_utc)),
-        )
-        if cursor.rowcount == 0:
-            cursor.execute(
-                """
-                INSERT INTO metadata_history_by_path(
-                    path, size, mtime_utc, run_id, first_seen_run_id, seen_count
-                )
-                VALUES(?, ?, ?, ?, ?, 1)
-                """,
-                (path, int(size), int(mtime_utc), run_id, run_id),
-            )
-        touched_paths.add(path)
+    """Batch deduplicated file metadata history."""
 
-    prune_metadata_history(connection, touched_paths, history_retention_per_path)
-    connection.commit()
+    item_list = list(items)
+    cursor = connection.cursor()
+    cursor.executemany(
+        """
+        INSERT INTO metadata_history_by_path(
+            path, size, mtime_utc, run_id, first_seen_run_id, seen_count
+        )
+        VALUES(?, ?, ?, ?, ?, 1)
+        ON CONFLICT(path, size, mtime_utc) DO UPDATE SET
+            run_id = excluded.run_id,
+            seen_count = metadata_history_by_path.seen_count + 1
+        """,
+        [
+            (path, int(size), int(mtime_utc), run_id, run_id)
+            for path, size, mtime_utc in item_list
+        ],
+    )
+    prune_metadata_history(connection, history_retention_per_path)
 
 
 def upsert_directory_history(
@@ -1044,48 +1189,38 @@ def upsert_directory_history(
     *,
     history_retention_per_path: int,
 ) -> None:
+    """Batch deduplicated directory metadata history."""
+
+    directory_list = list(directories)
     cursor = connection.cursor()
-    touched_paths: set[str] = set()
-    for directory in directories:
-        cursor.execute(
-            """
-            UPDATE directory_history_by_path
-            SET run_id = ?,
-                seen_count = seen_count + 1
-            WHERE path = ? AND mtime_utc = ? AND child_files = ? AND child_dirs = ?
-            """,
+    cursor.executemany(
+        """
+        INSERT INTO directory_history_by_path(
+            path, mtime_utc, child_files, child_dirs, run_id, first_seen_run_id, seen_count
+        )
+        VALUES(?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(path, mtime_utc, child_files, child_dirs) DO UPDATE SET
+            run_id = excluded.run_id,
+            seen_count = directory_history_by_path.seen_count + 1
+        """,
+        [
             (
-                run_id,
                 directory.path,
                 directory.mtime_utc,
                 directory.child_files,
                 directory.child_dirs,
-            ),
-        )
-        if cursor.rowcount == 0:
-            cursor.execute(
-                """
-                INSERT INTO directory_history_by_path(
-                    path, mtime_utc, child_files, child_dirs, run_id, first_seen_run_id, seen_count
-                )
-                VALUES(?, ?, ?, ?, ?, ?, 1)
-                """,
-                (
-                    directory.path,
-                    directory.mtime_utc,
-                    directory.child_files,
-                    directory.child_dirs,
-                    run_id,
-                    run_id,
-                ),
+                run_id,
+                run_id,
             )
-        touched_paths.add(directory.path)
-
-    prune_directory_history(connection, touched_paths, history_retention_per_path)
-    connection.commit()
+            for directory in directory_list
+        ],
+    )
+    prune_directory_history(connection, history_retention_per_path)
 
 
 def delete_latest_directories(connection: sqlite3.Connection, paths: Iterable[str]) -> None:
+    """Remove directory paths that were absent from the completed scan."""
+
     cursor = connection.cursor()
     cursor.executemany(
         "DELETE FROM latest_directories WHERE path = ?",
@@ -1095,80 +1230,92 @@ def delete_latest_directories(connection: sqlite3.Connection, paths: Iterable[st
 
 def prune_history(
     connection: sqlite3.Connection,
-    paths: Iterable[str],
     history_retention_per_path: int,
 ) -> None:
+    """Retain only the newest configured fingerprint states for each path."""
+
     if history_retention_per_path <= 0:
         return
 
-    cursor = connection.cursor()
-    for path in set(paths):
-        cursor.execute(
-            """
-            DELETE FROM history_by_path
-            WHERE path = ?
-              AND id NOT IN (
-                  SELECT id
-                  FROM history_by_path
-                  WHERE path = ?
-                  ORDER BY run_id DESC, id DESC
-                  LIMIT ?
-              )
-            """,
-            (path, path, int(history_retention_per_path)),
+    connection.execute(
+        """
+        DELETE FROM history_by_path
+        WHERE id IN (
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY path
+                        ORDER BY run_id DESC, id DESC
+                    ) AS history_rank
+                FROM history_by_path
+            )
+            WHERE history_rank > ?
         )
+        """,
+        (int(history_retention_per_path),),
+    )
 
 
 def prune_metadata_history(
     connection: sqlite3.Connection,
-    paths: Iterable[str],
     history_retention_per_path: int,
 ) -> None:
+    """Retain only the newest configured metadata states for each file path."""
+
     if history_retention_per_path <= 0:
         return
 
-    cursor = connection.cursor()
-    for path in set(paths):
-        cursor.execute(
-            """
-            DELETE FROM metadata_history_by_path
-            WHERE path = ?
-              AND id NOT IN (
-                  SELECT id
-                  FROM metadata_history_by_path
-                  WHERE path = ?
-                  ORDER BY run_id DESC, id DESC
-                  LIMIT ?
-              )
-            """,
-            (path, path, int(history_retention_per_path)),
+    connection.execute(
+        """
+        DELETE FROM metadata_history_by_path
+        WHERE id IN (
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY path
+                        ORDER BY run_id DESC, id DESC
+                    ) AS history_rank
+                FROM metadata_history_by_path
+            )
+            WHERE history_rank > ?
         )
+        """,
+        (int(history_retention_per_path),),
+    )
 
 
 def prune_directory_history(
     connection: sqlite3.Connection,
-    paths: Iterable[str],
     history_retention_per_path: int,
 ) -> None:
+    """Retain only the newest configured metadata states for each directory."""
+
     if history_retention_per_path <= 0:
         return
 
-    cursor = connection.cursor()
-    for path in set(paths):
-        cursor.execute(
-            """
-            DELETE FROM directory_history_by_path
-            WHERE path = ?
-              AND id NOT IN (
-                  SELECT id
-                  FROM directory_history_by_path
-                  WHERE path = ?
-                  ORDER BY run_id DESC, id DESC
-                  LIMIT ?
-              )
-            """,
-            (path, path, int(history_retention_per_path)),
+    connection.execute(
+        """
+        DELETE FROM directory_history_by_path
+        WHERE id IN (
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY path
+                        ORDER BY run_id DESC, id DESC
+                    ) AS history_rank
+                FROM directory_history_by_path
+            )
+            WHERE history_rank > ?
         )
+        """,
+        (int(history_retention_per_path),),
+    )
 
 
 def plan_hash_jobs(
@@ -1177,6 +1324,8 @@ def plan_hash_jobs(
     *,
     hash_new_files: bool,
 ) -> list[tuple[str, int]]:
+    """Select files that require a new or refreshed fingerprint."""
+
     jobs: list[tuple[str, int]] = []
     for path in sorted(current_meta):
         meta = current_meta[path]
@@ -1202,12 +1351,36 @@ def run_hash_jobs(
     algo: str,
     sample_bytes: int,
     max_workers: int,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, str]:
+    """Fingerprint planned files concurrently and fail on any unreadable file."""
+
     if not jobs:
+        if progress_callback:
+            progress_callback(
+                ProgressUpdate(
+                    phase="Hashing",
+                    current=0,
+                    total=0,
+                    message="no files require fingerprinting",
+                )
+            )
         return {}
 
     results: dict[str, str] = {}
     worker_count = max(1, max_workers)
+    total = len(jobs)
+    progress_interval = max(1, total // 1000)
+    if progress_callback:
+        progress_callback(
+            ProgressUpdate(
+                phase="Hashing",
+                current=0,
+                total=total,
+                message=f"{worker_count} worker(s)",
+            )
+        )
+
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(
@@ -1219,12 +1392,28 @@ def run_hash_jobs(
             ): path
             for path, size in jobs
         }
-        for future in as_completed(futures):
+        for completed, future in enumerate(as_completed(futures), start=1):
             path = futures[future]
             try:
                 results[path] = future.result()
-            except Exception:
-                continue
+            except Exception as exc:
+                for pending in futures:
+                    pending.cancel()
+                raise ScanError(
+                    "Fingerprinting failed, so the baseline was not updated. "
+                    f"Could not read {path!r}: {exc}"
+                ) from exc
+            if progress_callback and (
+                completed == total or completed % progress_interval == 0
+            ):
+                progress_callback(
+                    ProgressUpdate(
+                        phase="Hashing",
+                        current=completed,
+                        total=total,
+                        message=f"{worker_count} worker(s)",
+                    )
+                )
     return results
 
 
@@ -1234,6 +1423,8 @@ def diff(
     current_meta: dict[str, FileMeta],
     current_fingerprints: dict[str, str],
 ) -> list[Event]:
+    """Compare file baselines and classify file-level integrity events."""
+
     events: list[Event] = []
 
     previous_paths = set(previous)
@@ -1457,6 +1648,8 @@ def diff_directories(
     previous: dict[str, DirectoryMeta],
     current: dict[str, DirectoryMeta],
 ) -> list[Event]:
+    """Compare directory baselines and classify directory-level events."""
+
     events: list[Event] = []
     previous_dirs = set(previous)
     current_dirs = set(current)
@@ -1547,6 +1740,8 @@ def diff_directories(
 
 
 def write_events_csv(events: list[Event], out_path: Path) -> None:
+    """Write the stable flat event export consumed by operators and tooling."""
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -1606,6 +1801,8 @@ def _unique_destination(path: Path) -> Path:
 
 
 def move_legacy_event_csvs(outdir: Path) -> None:
+    """Move old top-level event CSVs into the current events directory."""
+
     events_dir = _events_dir(outdir)
     legacy_files = sorted(outdir.glob("events_*.csv"))
     if not legacy_files:
@@ -1787,9 +1984,30 @@ def _skipped_missing_fingerprint_hashes(
 
 
 def scan_files(settings: ScanSettings) -> dict[str, object]:
+    """Run one complete scan, comparison, persistence, and event export."""
+
     root = Path(settings.root).expanduser()
     if not root.exists():
         raise ScanError(f"Root does not exist: {root}", exit_code=2)
+    if not root.is_dir():
+        raise ScanError(f"Root is not a directory: {root}", exit_code=2)
+    if settings.sample_bytes <= 0:
+        raise ScanError("--sample-bytes must be greater than zero.", exit_code=2)
+    if settings.max_workers <= 0:
+        raise ScanError("--max-workers must be greater than zero.", exit_code=2)
+    if settings.history_retention_per_path < 0:
+        raise ScanError(
+            "--history-retention-per-path must be zero or greater.",
+            exit_code=2,
+        )
+    try:
+        hashlib.new(settings.algo)
+    except (TypeError, ValueError) as exc:
+        raise ScanError(
+            f"Unsupported hash algorithm {settings.algo!r}. "
+            "Use a name supported by Python hashlib, such as sha256.",
+            exit_code=2,
+        ) from exc
 
     db_path = Path(settings.db).expanduser().resolve()
     outdir = Path(settings.outdir).expanduser().resolve()
@@ -1798,18 +2016,40 @@ def scan_files(settings: ScanSettings) -> dict[str, object]:
         if settings.latest_json is not None
         else None
     )
-    outdir.mkdir(parents=True, exist_ok=True)
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ScanError(f"Cannot create report directory {str(outdir)!r}: {exc}") from exc
 
     run_id = make_run_id()
     started_at = utc_now_iso()
     start = time.time()
 
-    connection = open_db(db_path)
+    try:
+        connection = open_db(db_path)
+    except (OSError, sqlite3.Error) as exc:
+        raise ScanError(f"Cannot open SQLite database {str(db_path)!r}: {exc}") from exc
+
     try:
         previous = load_latest_by_path(connection)
         previous_directories = load_latest_directories(connection)
 
-        current_meta, current_directories = collect_tree_scandir(root, settings.exclusions)
+        if settings.progress_callback:
+            settings.progress_callback(
+                ProgressUpdate(
+                    phase="Scanning",
+                    current=0,
+                    total=len(previous) or None,
+                    estimated=bool(previous),
+                    message="estimating from the previous baseline" if previous else "first baseline",
+                )
+            )
+        current_meta, current_directories = collect_tree_scandir(
+            root,
+            settings.exclusions,
+            progress_callback=settings.progress_callback,
+            estimated_file_total=len(previous) or None,
+        )
 
         jobs = plan_hash_jobs(
             previous,
@@ -1821,7 +2061,18 @@ def scan_files(settings: ScanSettings) -> dict[str, object]:
             algo=settings.algo,
             sample_bytes=settings.sample_bytes,
             max_workers=settings.max_workers,
+            progress_callback=settings.progress_callback,
         )
+        if settings.progress_callback:
+            settings.progress_callback(
+                ProgressUpdate(
+                    phase="Comparing",
+                    current=0,
+                    total=1,
+                    unit="phase",
+                    message=f"{len(current_meta):,} files",
+                )
+            )
         metadata_only_files = _metadata_only_file_count(
             previous,
             current_meta,
@@ -1843,9 +2094,28 @@ def scan_files(settings: ScanSettings) -> dict[str, object]:
             *diff_directories(connection, previous_directories, current_directories),
             *diff(connection, previous, current_meta, current_fingerprints),
         ]
+        if settings.progress_callback:
+            settings.progress_callback(
+                ProgressUpdate(
+                    phase="Comparing",
+                    current=1,
+                    total=1,
+                    unit="phase",
+                    message=f"{len(events):,} event(s)",
+                )
+            )
 
         duration_s = time.time() - start
         normalized_root = normalize_path(root)
+        if settings.progress_callback:
+            settings.progress_callback(
+                ProgressUpdate(
+                    phase="Saving",
+                    current=0,
+                    total=len(current_meta),
+                    message="batching SQLite state",
+                )
+            )
         persist_run(
             connection,
             run_id,
@@ -1896,12 +2166,46 @@ def scan_files(settings: ScanSettings) -> dict[str, object]:
             previous_directories.keys() - current_directories.keys(),
         )
         connection.commit()
+        if settings.progress_callback:
+            settings.progress_callback(
+                ProgressUpdate(
+                    phase="Saving",
+                    current=len(current_meta),
+                    total=len(current_meta),
+                    message="SQLite transaction committed",
+                )
+            )
+    except ScanError:
+        connection.rollback()
+        raise
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise ScanError(
+            "SQLite persistence failed, so the current baseline was not committed. "
+            f"Database {str(db_path)!r}: {exc}"
+        ) from exc
     finally:
         connection.close()
 
-    move_legacy_event_csvs(outdir)
-    events_csv = _events_dir(outdir) / f"events_{run_id}.csv"
-    write_events_csv(events, events_csv)
+    if settings.progress_callback:
+        settings.progress_callback(
+            ProgressUpdate(
+                phase="Reporting",
+                current=0,
+                total=1,
+                unit="phase",
+                message="writing event outputs",
+            )
+        )
+    try:
+        move_legacy_event_csvs(outdir)
+        events_csv = _events_dir(outdir) / f"events_{run_id}.csv"
+        write_events_csv(events, events_csv)
+    except OSError as exc:
+        raise ScanError(
+            "The scan state was saved, but the event report could not be written. "
+            f"Output directory {str(outdir)!r}: {exc}"
+        ) from exc
 
     summary: dict[str, object] = {
         "run_id": run_id,
@@ -1929,6 +2233,23 @@ def scan_files(settings: ScanSettings) -> dict[str, object]:
     }
 
     if latest_json is not None:
-        _write_json(latest_json, summary)
+        try:
+            _write_json(latest_json, summary)
+        except OSError as exc:
+            raise ScanError(
+                "The scan state and event CSV were saved, but the latest JSON "
+                f"could not be written to {str(latest_json)!r}: {exc}"
+            ) from exc
+
+    if settings.progress_callback:
+        settings.progress_callback(
+            ProgressUpdate(
+                phase="Reporting",
+                current=1,
+                total=1,
+                unit="phase",
+                message="event outputs written",
+            )
+        )
 
     return summary

@@ -167,6 +167,26 @@ Or use the compatibility wrapper without installing the package:
 python .\file_check.py --root "S:\" --max-workers 6 --no-hash-new-files
 ```
 
+### Terminal Progress
+
+Interactive runs show a single-line progress bar on the terminal:
+
+```text
+Scanning    [############------------]   50.0% | 500,000 / ~1,000,000 files
+Hashing     [########################]  100.0% | 24 / 24 files
+Saving      [########################]  100.0% | 1,002,184 / 1,002,184 files
+Complete    [########################]  100.0% | 1,002,184 / 1,002,184 files
+```
+
+Discovery uses the previous baseline count as an estimate, shown with `~`.
+This avoids a second full traversal. On the first baseline, the scanner shows
+the checked file count with an unknown percentage until discovery completes.
+Hashing and completion use exact totals.
+
+Progress is written to standard error, leaving JSON on standard output valid.
+It is automatically hidden for redirected/scheduled runs. Use `--no-progress`
+to disable it explicitly.
+
 Scanner-only compatibility wrapper:
 
 ```powershell
@@ -327,6 +347,7 @@ Useful options:
 --exclude-file PATH               read extra exclusions from a plain text file
 --clear-default-exclusions        use only exclusions supplied on CLI
 --include-numbered-dirs           do not skip directories beginning with a digit
+--no-progress                     disable the interactive terminal progress bar
 --archive-policy high|always|never
 --json-detail compact|full        compact saved JSON by default; CSV/HTML keep details
 --fail-on-high                    return exit code 1 when critical/high events exist
@@ -389,6 +410,18 @@ Start in: C:\Alieyeh\project\file_check
 
 SQLite is designed to stay compact:
 
+```mermaid
+erDiagram
+    RUNS ||--o{ LATEST_BY_PATH : observes
+    RUNS ||--o{ HISTORY_BY_PATH : records
+    RUNS ||--o{ METADATA_HISTORY_BY_PATH : records
+    RUNS ||--o{ LATEST_DIRECTORIES : observes
+    RUNS ||--o{ DIRECTORY_HISTORY_BY_PATH : records
+    LATEST_BY_PATH ||--o{ HISTORY_BY_PATH : "fingerprint history"
+    LATEST_BY_PATH ||--o{ METADATA_HISTORY_BY_PATH : "metadata history"
+    LATEST_DIRECTORIES ||--o{ DIRECTORY_HISTORY_BY_PATH : "directory history"
+```
+
 | Table | Purpose |
 | --- | --- |
 | `latest_by_path` | one current row per tracked file path |
@@ -407,6 +440,24 @@ Additional storage behavior:
 - `--history-retention-per-path 0` keeps all retained history.
 - saved JSON uses `--json-detail compact` by default; detailed evidence remains in CSV and HTML reports.
 - use `--json-detail full` only when full embedded event detail is required in JSON.
+
+The full field-level ER diagram, keys, uniqueness rules, and transaction model
+are documented in [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md).
+
+## Performance
+
+The scanner now uses batched SQLite upserts and commits a completed baseline in
+one transaction. It already performs one pruned `os.scandir` traversal for both
+files and directories, and the progress bar is throttled to avoid per-file
+terminal overhead.
+
+For the complete tuning guide and measured-safe future options, see
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+> [!TIP]
+> On a very large TRE, exclusions and `--no-hash-new-files` normally matter
+> much more than increasing `--max-workers`. Worker count affects fingerprint
+> jobs, not the metadata traversal.
 
 ---
 
@@ -447,6 +498,31 @@ internet access:
 > unless they have been reviewed for sensitive paths.
 
 More deployment detail is in [docs/TRE_DEPLOYMENT.md](docs/TRE_DEPLOYMENT.md).
+
+## Paths With Spaces
+
+Spaces in roots, filenames, database paths, report paths, and exclusion-file
+paths are supported and covered by tests. Quote path arguments in PowerShell:
+
+```powershell
+python .\file_check.py `
+  --root "C:\Alieyeh\Research Data" `
+  --db "C:\Alieyeh\Monitor State\state.sqlite3" `
+  --outdir "C:\Alieyeh\Weekly Reports" `
+  --exclude-file ".\config\exclude dirs.txt" `
+  --no-hash-new-files
+```
+
+Enter only the command itself. Do not paste the leading
+`PS C:\Path\To\Project>` prompt or a previous traceback back into PowerShell.
+
+## Failure Behavior
+
+Operational failures return a non-zero exit code and a concise JSON error.
+Incomplete filesystem reads and fingerprint failures do not update the
+baseline, preventing inaccessible entries from being misreported as deletions.
+The complete workflow also writes text and HTML error reports when the report
+directory is available.
 
 ## Tests
 

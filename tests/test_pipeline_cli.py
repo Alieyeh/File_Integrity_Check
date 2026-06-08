@@ -279,6 +279,60 @@ class PipelineAndCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["stats"]["scanned_files"], 1)
 
+    def test_cli_accepts_quoted_style_paths_with_spaces(self) -> None:
+        spaced_root = self.base / "root with spaces"
+        spaced_root.mkdir()
+        file_path = spaced_root / "folder with spaces" / "source file.txt"
+        file_path.parent.mkdir()
+        file_path.write_text("alpha", encoding="utf-8")
+        spaced_db = self.base / "database folder" / "state file.sqlite3"
+        spaced_outdir = self.base / "report folder"
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "scan",
+                    "--root",
+                    str(spaced_root),
+                    "--db",
+                    str(spaced_db),
+                    "--outdir",
+                    str(spaced_outdir),
+                    "--no-hash-new-files",
+                    "--no-progress",
+                    "--clear-default-exclusions",
+                    "--include-numbered-dirs",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["stats"]["scanned_files"], 1)
+        self.assertTrue(spaced_db.exists())
+
+    def test_cli_invalid_worker_count_returns_clean_error(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "scan",
+                    "--root",
+                    str(self.root),
+                    "--db",
+                    str(self.db),
+                    "--outdir",
+                    str(self.outdir),
+                    "--max-workers",
+                    "0",
+                    "--no-progress",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["error"], "--max-workers must be greater than zero.")
+
     def test_cli_missing_exclude_file_returns_clean_error(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):

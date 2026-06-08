@@ -6,6 +6,8 @@ from typing import Any
 
 
 def stats_value(payload: dict[str, Any], key: str, default: int = 0) -> int:
+    """Read an integer statistic defensively from a workflow payload."""
+
     stats = payload.get("stats")
     if not isinstance(stats, dict):
         return default
@@ -17,6 +19,8 @@ def stats_value(payload: dict[str, Any], key: str, default: int = 0) -> int:
 
 
 def alert_level(payload: dict[str, Any]) -> tuple[str, str, str]:
+    """Return the display label, CSS class, and summary for a payload."""
+
     critical = stats_value(payload, "critical")
     high = stats_value(payload, "high")
     medium = stats_value(payload, "medium")
@@ -193,6 +197,8 @@ def _lay_summary(payload: dict[str, Any]) -> str:
 
 
 def build_human_html_report(payload: dict[str, Any]) -> str:
+    """Build the self-contained visual report used by researchers and operators."""
+
     level, level_class, subtitle = alert_level(payload)
     events = _events(payload)
     reports = _reports(payload)
@@ -388,6 +394,8 @@ def build_human_html_report(payload: dict[str, Any]) -> str:
 
 
 def build_error_html_report(payload: dict[str, Any]) -> str:
+    """Build a self-contained HTML diagnostic report."""
+
     report = escape(str(payload.get("ops_report", ""))).replace("\n", "<br>")
     return f"""<!doctype html>
 <html lang="en">

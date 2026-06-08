@@ -6,13 +6,15 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from file_integrity_monitor.config import ExclusionConfig, ScanSettings, load_exclusions_file
-from file_integrity_monitor.scanner import scan_files
+from file_integrity_monitor.scanner import ScanError, scan_files
 
 
 class ScannerTests(unittest.TestCase):
@@ -626,6 +628,83 @@ class ScannerTests(unittest.TestCase):
 
         saved = json.loads(latest.read_text(encoding="utf-8"))
         self.assertEqual(saved["run_id"], result["run_id"])
+
+    def test_scan_supports_spaces_in_root_file_database_and_report_paths(self) -> None:
+        spaced_root = self.base / "research data root"
+        spaced_root.mkdir()
+        file_path = spaced_root / "folder with spaces" / "draft report 2.md"
+        file_path.parent.mkdir()
+        file_path.write_text("content", encoding="utf-8")
+        settings = ScanSettings(
+            root=spaced_root,
+            db=self.base / "state files" / "monitor state.sqlite3",
+            outdir=self.base / "report output",
+            max_workers=1,
+            hash_new_files=False,
+            exclusions=ExclusionConfig(
+                dir_names=frozenset(),
+                path_prefixes=(),
+                exclude_dirs_starting_with_digit=False,
+            ),
+        )
+
+        result = scan_files(settings)
+
+        self.assertEqual(result["stats"]["scanned_files"], 1)
+        self.assertEqual(result["root"], str(spaced_root.resolve()).lower())
+        self.assertTrue(Path(result["db"]).exists())
+        self.assertTrue(Path(result["reports"]["events_csv"]).exists())
+
+    def test_scan_emits_counted_progress_phases(self) -> None:
+        self._write("one.txt", "one", 1_700_000_001)
+        self._write("two.txt", "two", 1_700_000_002)
+        updates = []
+        settings = replace(
+            self._settings(hash_new_files=True),
+            progress_callback=updates.append,
+        )
+
+        result = scan_files(settings)
+
+        phases = {update.phase for update in updates}
+        self.assertEqual(result["stats"]["scanned_files"], 2)
+        self.assertTrue({"Scanning", "Hashing", "Comparing", "Saving", "Reporting"} <= phases)
+        final_scan = [update for update in updates if update.phase == "Scanning"][-1]
+        self.assertEqual(final_scan.current, 2)
+        self.assertEqual(final_scan.total, 2)
+        self.assertFalse(final_scan.estimated)
+
+    def test_fingerprint_read_failure_is_clear_and_does_not_commit_run(self) -> None:
+        self._write("sample.txt", "alpha", 1_700_000_001)
+
+        with patch(
+            "file_integrity_monitor.scanner.compute_fingerprint",
+            side_effect=PermissionError("access denied"),
+        ):
+            with self.assertRaisesRegex(
+                ScanError,
+                "Fingerprinting failed.*sample.txt.*access denied",
+            ):
+                scan_files(self._settings(hash_new_files=True))
+
+        connection = sqlite3.connect(self.db)
+        try:
+            run_count = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            latest_count = connection.execute(
+                "SELECT COUNT(*) FROM latest_by_path"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(run_count, 0)
+        self.assertEqual(latest_count, 0)
+
+    def test_file_path_cannot_be_used_as_scan_root(self) -> None:
+        file_root = self.base / "not a directory.txt"
+        file_root.write_text("not a tree", encoding="utf-8")
+        settings = replace(self._settings(), root=file_root)
+
+        with self.assertRaisesRegex(ScanError, "Root is not a directory"):
+            scan_files(settings)
 
 
 if __name__ == "__main__":
